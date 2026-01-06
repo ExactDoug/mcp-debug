@@ -6,12 +6,12 @@
     "url": "https://github.com/standardbeagle/mcp-debug",
     "source": "github"
   },
-  "version": "1.0.0",
+  "version": "1.1.0",
   "packages": [
     {
       "registryType": "pypi",
       "name": "mcp-debug",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
@@ -20,7 +20,7 @@
     {
       "registryType": "npm",
       "name": "mcp-debug",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"
