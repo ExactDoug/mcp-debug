@@ -37,11 +37,11 @@ MCP Debug enables rapid development and testing of MCP servers with hot-swapping
 uvx mcp-debug --help
 
 # Using npx (Node.js)
-npx mcp-debug --help
+npx mcp-server-debug --help
 
 # Or install globally
-pip install mcp-debug    # Python
-npm install -g mcp-debug # Node.js
+pip install mcp-debug         # Python
+npm install -g mcp-server-debug # Node.js
 
 # Or build from source
 go install github.com/standardbeagle/mcp-debug@latest

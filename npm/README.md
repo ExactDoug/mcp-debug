@@ -6,10 +6,10 @@ A debugging and development tool for [Model Context Protocol (MCP)](https://mode
 
 ```bash
 # Run directly with npx (recommended)
-npx mcp-debug --help
+npx mcp-server-debug --help
 
 # Or install globally
-npm install -g mcp-debug
+npm install -g mcp-server-debug
 mcp-debug --help
 ```
 
@@ -24,13 +24,13 @@ mcp-debug --help
 
 ```bash
 # Start proxy with config
-npx mcp-debug --proxy --config config.yaml
+npx mcp-server-debug --proxy --config config.yaml
 
 # Record a session
-npx mcp-debug --proxy --config config.yaml --record session.jsonl
+npx mcp-server-debug --proxy --config config.yaml --record session.jsonl
 
 # Playback recorded requests
-npx mcp-debug --playback-client session.jsonl | ./your-mcp-server
+npx mcp-server-debug --playback-client session.jsonl | ./your-mcp-server
 ```
 
 ## Programmatic Usage
