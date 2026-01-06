@@ -55,6 +55,18 @@ func setupLogging(logFile string) error {
 }
 
 func main() {
+	// Handle version and help flags before standard flag parsing
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "-v", "--version", "version":
+			handleVersionCommand()
+			return
+		case "-h", "--help", "help":
+			printUsage()
+			return
+		}
+	}
+
 	// Define command line flags
 	var (
 		proxyMode      = flag.Bool("proxy", false, "Run in proxy mode")
@@ -106,12 +118,6 @@ func main() {
 	// Handle CLI commands and configuration (original mode)
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
-		case "-h", "--help":
-			printUsage()
-			return
-		case "-v", "--version":
-			handleVersionCommand()
-			return
 		case "config":
 			handleConfigCommand()
 			return
@@ -135,7 +141,7 @@ func main() {
 
 	// Detect if running from CLI vs MCP client
 	if isRunningFromCLI() {
-		fmt.Printf("MCP Server: Dynamic MCP Server v%s\n", Version)
+		fmt.Printf("MCP Debug v%s\n", Version)
 		fmt.Printf("This is an MCP (Model Context Protocol) server.\n")
 		fmt.Printf("It should be run by an MCP client, not directly from the command line.\n\n")
 		printUsage()
@@ -144,7 +150,7 @@ func main() {
 
 	// Create MCP server
 	s := server.NewMCPServer(
-		"Dynamic MCP Server",
+		"MCP Debug",
 		Version,
 		server.WithToolCapabilities(true),
 	)
@@ -280,8 +286,17 @@ func runProxyServer(configPath string) error {
 		return fmt.Errorf("failed to initialize proxy server: %w", err)
 	}
 	
-	// Set up graceful shutdown
-	// TODO: Add signal handling for graceful shutdown
+	// Set up graceful shutdown with signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		log.Println("Received shutdown signal...")
+		if err := proxyServer.Shutdown(ctx); err != nil {
+			log.Printf("Shutdown error: %v", err)
+		}
+		os.Exit(0)
+	}()
 	defer func() {
 		log.Println("Shutting down...")
 		if err := proxyServer.Shutdown(ctx); err != nil {
@@ -370,14 +385,58 @@ func printUsage() {
     
     For more information about MCP:
     https://modelcontextprotocol.io/
-`, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
+`, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 }
 
 // handleVersionCommand shows version information
 func handleVersionCommand() {
-	fmt.Printf("Dynamic MCP Server v%s\n", Version)
+	fmt.Printf("MCP Debug v%s\n", Version)
 	fmt.Printf("Build time: %s\n", BuildTime)
 	fmt.Printf("Git commit: %s\n", GitCommit)
+}
+
+// getConfigPath returns the configuration file path
+func getConfigPath() string {
+	if path := os.Getenv("MCP_CONFIG_PATH"); path != "" {
+		return path
+	}
+	return "./config.yaml"
+}
+
+// Tool represents an MCP tool for CLI testing
+type Tool struct {
+	Name        string
+	Description string
+	Parameters  []ToolParameter
+	Handler     func(args map[string]string) string
+}
+
+// ToolParameter represents a tool parameter
+type ToolParameter struct {
+	Name        string
+	Type        string
+	Required    bool
+	Description string
+}
+
+// getRegisteredTools returns the list of built-in tools for CLI testing
+func getRegisteredTools() []Tool {
+	return []Tool{
+		{
+			Name:        "hello_world",
+			Description: "Say hello to someone",
+			Parameters: []ToolParameter{
+				{Name: "name", Type: "string", Required: true, Description: "Name of person to greet"},
+			},
+			Handler: func(args map[string]string) string {
+				name := args["name"]
+				if name == "" {
+					name = "World"
+				}
+				return fmt.Sprintf("Hello, %s!", name)
+			},
+		},
+	}
 }
 
 // handleConfigCommand manages configuration files
@@ -401,39 +460,55 @@ Example:
 
 	switch os.Args[2] {
 	case "init":
-		fmt.Println("Creating default configuration file...")
-		// TODO: Implement config file creation
-		fmt.Println("Configuration file created at: ./config.json")
+		configPath := getConfigPath()
+		if _, err := os.Stat(configPath); err == nil {
+			fmt.Printf("Configuration file already exists at: %s\n", configPath)
+			fmt.Println("Use 'config show' to view it or delete it to create a new one.")
+			return
+		}
+		defaultConfig := `# MCP Debug Proxy Configuration
+servers: []
+  # Example server configuration:
+  # - name: "filesystem"
+  #   prefix: "fs"
+  #   transport: "stdio"
+  #   command: "npx"
+  #   args: ["-y", "@modelcontextprotocol/filesystem", "/home/user"]
+  #   timeout: "30s"
+
+proxy:
+  healthCheckInterval: "30s"
+  connectionTimeout: "10s"
+  maxRetries: 3
+`
+		if err := os.WriteFile(configPath, []byte(defaultConfig), 0644); err != nil {
+			fmt.Printf("Error creating configuration file: %v\n", err)
+			return
+		}
+		fmt.Printf("Configuration file created at: %s\n", configPath)
 	case "show":
+		configPath := getConfigPath()
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			fmt.Printf("No configuration file found at: %s\n", configPath)
+			fmt.Println("Run 'config init' to create one.")
+			return
+		}
 		fmt.Println("Current configuration:")
-		// TODO: Implement config display
-		fmt.Println("No configuration file found. Run 'config init' to create one.")
-	case "set":
-		if len(os.Args) < 5 {
-			fmt.Println("Usage: config set <key> <value>")
-			return
-		}
-		key, value := os.Args[3], os.Args[4]
-		fmt.Printf("Setting %s = %s\n", key, value)
-		// TODO: Implement config value setting
-	case "get":
-		if len(os.Args) < 4 {
-			fmt.Println("Usage: config get <key>")
-			return
-		}
-		key := os.Args[3]
-		fmt.Printf("Getting value for %s\n", key)
-		// TODO: Implement config value retrieval
+		fmt.Println(string(data))
 	case "validate":
-		fmt.Println("Validating configuration...")
-		// TODO: Implement config validation
-		fmt.Println("Configuration validation not yet implemented.")
-	case "path":
-		configPath := os.Getenv("MCP_CONFIG_PATH")
-		if configPath == "" {
-			configPath = "./config.json"
+		configPath := getConfigPath()
+		if len(os.Args) >= 4 {
+			configPath = os.Args[3]
 		}
-		fmt.Printf("Configuration file path: %s\n", configPath)
+		cfg, err := config.LoadConfig(configPath)
+		if err != nil {
+			fmt.Printf("Configuration validation failed: %v\n", err)
+			return
+		}
+		fmt.Printf("Configuration is valid: %d server(s) configured\n", len(cfg.Servers))
+	case "path":
+		fmt.Printf("Configuration file path: %s\n", getConfigPath())
 	default:
 		fmt.Printf("Unknown config command: %s\n", os.Args[2])
 	}
@@ -480,8 +555,16 @@ MCP_CONFIG_PATH=./config.json
 # DATABASE_URL=your-database-url-here`)
 	case "validate":
 		fmt.Println("Validating environment variables...")
-		// TODO: Implement env var validation
-		fmt.Println("✓ Environment variables are valid")
+		valid := true
+		if os.Getenv("MCP_CONFIG_PATH") != "" {
+			if _, err := os.Stat(os.Getenv("MCP_CONFIG_PATH")); os.IsNotExist(err) {
+				fmt.Printf("✗ MCP_CONFIG_PATH points to non-existent file: %s\n", os.Getenv("MCP_CONFIG_PATH"))
+				valid = false
+			}
+		}
+		if valid {
+			fmt.Println("✓ Environment variables are valid")
+		}
 	default:
 		fmt.Printf("Unknown env command: %s\n", os.Args[2])
 	}
@@ -500,30 +583,45 @@ Example:
 		return
 	}
 
+	tools := getRegisteredTools()
+
 	switch os.Args[2] {
 	case "list":
 		fmt.Println("Available tools:")
-		fmt.Println("- hello_world: Say hello to someone")
-		// TODO: Dynamically list registered tools
+		for _, tool := range tools {
+			fmt.Printf("- %s: %s\n", tool.Name, tool.Description)
+		}
 	default:
 		toolName := os.Args[2]
 		fmt.Printf("Testing tool: %s\n", toolName)
 
-		if toolName == "hello_world" {
-			name := "World"
-			if len(os.Args) > 3 {
-				// Simple argument parsing for demo
-				for _, arg := range os.Args[3:] {
-					if strings.HasPrefix(arg, "name=") {
-						name = strings.TrimPrefix(arg, "name=")
-						name = strings.Trim(name, "\"'")
-					}
-				}
+		// Find the tool
+		var found *Tool
+		for i := range tools {
+			if tools[i].Name == toolName {
+				found = &tools[i]
+				break
 			}
-			fmt.Printf("Result: Hello, %s!\n", name)
-		} else {
-			fmt.Printf("Unknown tool: %s\n", toolName)
 		}
+
+		if found == nil {
+			fmt.Printf("Unknown tool: %s\n", toolName)
+			return
+		}
+
+		// Parse arguments
+		args := make(map[string]string)
+		for _, arg := range os.Args[3:] {
+			if idx := strings.Index(arg, "="); idx > 0 {
+				key := arg[:idx]
+				value := strings.Trim(arg[idx+1:], "\"'")
+				args[key] = value
+			}
+		}
+
+		// Execute the tool
+		result := found.Handler(args)
+		fmt.Printf("Result: %s\n", result)
 	}
 }
 
@@ -543,55 +641,93 @@ Example:
 		return
 	}
 
+	tools := getRegisteredTools()
+
 	switch os.Args[2] {
 	case "list":
 		fmt.Println("Available MCP Tools:")
 		fmt.Println()
-		fmt.Println("hello_world")
-		fmt.Println("  Description: Say hello to someone")
-		fmt.Println("  Parameters:")
-		fmt.Println("    - name (string, required): Name of person to greet")
-		fmt.Println()
-		// TODO: Dynamically list all registered tools
+		for _, tool := range tools {
+			fmt.Println(tool.Name)
+			fmt.Printf("  Description: %s\n", tool.Description)
+			fmt.Println("  Parameters:")
+			for _, param := range tool.Parameters {
+				reqStr := ""
+				if param.Required {
+					reqStr = ", required"
+				}
+				fmt.Printf("    - %s (%s%s): %s\n", param.Name, param.Type, reqStr, param.Description)
+			}
+			fmt.Println()
+		}
 	case "describe":
 		if len(os.Args) < 4 {
 			fmt.Println("Usage: tools describe <tool>")
 			return
 		}
 		toolName := os.Args[3]
-		if toolName == "hello_world" {
-			fmt.Println("Tool: hello_world")
-			fmt.Println("Description: Say hello to someone")
-			fmt.Println("Parameters:")
-			fmt.Println("  - name (string, required): Name of person to greet")
-			fmt.Println()
-			fmt.Println("Example usage:")
-			fmt.Printf("  %s tools run hello_world --name \"John\"\n", os.Args[0])
-			fmt.Printf("  %s test hello_world name=\"John\"\n", os.Args[0])
-		} else {
-			fmt.Printf("Unknown tool: %s\n", toolName)
+
+		var found *Tool
+		for i := range tools {
+			if tools[i].Name == toolName {
+				found = &tools[i]
+				break
+			}
 		}
+
+		if found == nil {
+			fmt.Printf("Unknown tool: %s\n", toolName)
+			return
+		}
+
+		fmt.Printf("Tool: %s\n", found.Name)
+		fmt.Printf("Description: %s\n", found.Description)
+		fmt.Println("Parameters:")
+		for _, param := range found.Parameters {
+			reqStr := ""
+			if param.Required {
+				reqStr = ", required"
+			}
+			fmt.Printf("  - %s (%s%s): %s\n", param.Name, param.Type, reqStr, param.Description)
+		}
+		fmt.Println()
+		fmt.Println("Example usage:")
+		fmt.Printf("  %s tools run %s --name \"John\"\n", os.Args[0], found.Name)
+		fmt.Printf("  %s test %s name=\"John\"\n", os.Args[0], found.Name)
 	case "run":
 		if len(os.Args) < 4 {
 			fmt.Println("Usage: tools run <tool> [args]")
 			return
 		}
 		toolName := os.Args[3]
+
+		var found *Tool
+		for i := range tools {
+			if tools[i].Name == toolName {
+				found = &tools[i]
+				break
+			}
+		}
+
+		if found == nil {
+			fmt.Printf("Unknown tool: %s\n", toolName)
+			return
+		}
+
 		fmt.Printf("Running tool: %s\n", toolName)
 
-		if toolName == "hello_world" {
-			name := "World"
-			// Parse CLI arguments (simple implementation)
-			for i := 4; i < len(os.Args); i++ {
-				if os.Args[i] == "--name" && i+1 < len(os.Args) {
-					name = os.Args[i+1]
-					i++ // Skip next arg as it's the value
-				}
+		// Parse CLI arguments
+		args := make(map[string]string)
+		for i := 4; i < len(os.Args); i++ {
+			if strings.HasPrefix(os.Args[i], "--") && i+1 < len(os.Args) {
+				key := strings.TrimPrefix(os.Args[i], "--")
+				args[key] = os.Args[i+1]
+				i++
 			}
-			fmt.Printf("Result: Hello, %s!\n", name)
-		} else {
-			fmt.Printf("Unknown tool: %s\n", toolName)
 		}
+
+		result := found.Handler(args)
+		fmt.Printf("Result: %s\n", result)
 	default:
 		fmt.Printf("Unknown tools command: %s\n", os.Args[2])
 	}

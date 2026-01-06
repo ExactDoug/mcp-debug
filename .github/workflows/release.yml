@@ -1,0 +1,234 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Run tests
+        run: go test -v -race ./...
+
+  build:
+    name: Build Binaries
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            suffix: ""
+          - goos: linux
+            goarch: arm64
+            suffix: ""
+          - goos: darwin
+            goarch: amd64
+            suffix: ""
+          - goos: darwin
+            goarch: arm64
+            suffix: ""
+          - goos: windows
+            goarch: amd64
+            suffix: ".exe"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go build -ldflags "-X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X main.GitCommit=${{ github.sha }}" \
+            -o mcp-debug-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }} .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-debug-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: mcp-debug-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          find artifacts -type f -exec cp {} release/ \;
+          ls -la release/
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release/*
+          generate_release_notes: true
+          body: |
+            ## MCP Debug v${{ steps.version.outputs.VERSION }}
+
+            A debugging and development tool for MCP servers.
+
+            ### Installation
+
+            ```bash
+            # Using uvx (Python)
+            uvx mcp-debug --help
+
+            # Using npx (Node.js)
+            npx mcp-debug --help
+
+            # Direct binary download (Linux amd64)
+            curl -L https://github.com/standardbeagle/mcp-debug/releases/download/v${{ steps.version.outputs.VERSION }}/mcp-debug-linux-amd64 -o mcp-debug
+            chmod +x mcp-debug
+
+            # Or build from source
+            go install github.com/standardbeagle/mcp-debug@v${{ steps.version.outputs.VERSION }}
+            ```
+
+            ### Features
+
+            - Hot-swap server binaries without disconnecting clients
+            - Session recording and playback for testing
+            - Multi-server proxy with tool prefixing
+            - Dynamic server management
+
+            See the [README](https://github.com/standardbeagle/mcp-debug#readme) for full documentation.
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: release
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/mcp-debug/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Update version in pyproject.toml
+        working-directory: pypi
+        run: |
+          sed -i 's/version = ".*"/version = "${{ steps.version.outputs.VERSION }}"/' pyproject.toml
+
+      - name: Update version in __init__.py
+        working-directory: pypi
+        run: |
+          sed -i 's/__version__ = ".*"/__version__ = "${{ steps.version.outputs.VERSION }}"/' mcp_debug/__init__.py
+
+      - name: Build package
+        working-directory: pypi
+        run: uv build --out-dir dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: pypi/dist/
+
+  publish-npm:
+    name: Publish to npm
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Update version in package.json
+        working-directory: npm
+        run: |
+          npm version ${{ steps.version.outputs.VERSION }} --no-git-tag-version
+
+      - name: Publish to npm
+        working-directory: npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-mcp-registry:
+    name: Publish to MCP Registry
+    needs: [publish-pypi, publish-npm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          chmod +x mcp-publisher
+          sudo mv mcp-publisher /usr/local/bin/
+
+      - name: Authenticate to MCP Registry
+        run: mcp-publisher login github-oidc
+
+      - name: Update server.json with version
+        run: |
+          jq --arg v "${{ steps.version.outputs.VERSION }}" '
+            .version = $v |
+            .packages[].version = $v
+          ' server.json > server.tmp
+          mv server.tmp server.json
+          cat server.json
+
+      - name: Publish to MCP Registry
+        run: mcp-publisher publish

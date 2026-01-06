@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-debug"
+version = "1.0.0"
+description = "A debugging and development tool for MCP servers with hot-swapping, session recording, and automated playback testing"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "StandardBeagle" }
+]
+keywords = ["mcp", "model-context-protocol", "debugging", "development", "proxy"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: Software Development :: Testing",
+]
+
+[project.urls]
+Homepage = "https://github.com/standardbeagle/mcp-debug"
+Repository = "https://github.com/standardbeagle/mcp-debug"
+Issues = "https://github.com/standardbeagle/mcp-debug/issues"
+
+[project.scripts]
+mcp-debug = "mcp_debug:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["mcp_debug"]

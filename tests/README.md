@@ -23,32 +23,29 @@ This directory contains all tests for the MCP Debug project.
 - `scripts/` - Test utility scripts
   - `test-playback.sh` - Playback testing script
 
-- `experimental/` - Experimental and investigation scripts
-  - `test-mcp-client-final.go` - Final MCP client implementation test
-  - `test-tool-discovery.go` - Tool discovery testing
-  - `test-dynamic-registration.go` - Dynamic registration Go implementation
-  - `test-dynamic-registration-simple.go` - Simplified dynamic registration
-  - `test-concurrent-servers.go` - Concurrent server testing
-  - `test-tool-proxy.go` - Tool proxy testing
-
 ## Running Tests
 
 ### Integration Tests
 
 ```bash
 # Run all integration tests
-cd tests/integration
+./run-all-tests.sh
+
+# Run individual tests
+cd integration
 python3 test-proxy-calls.py
 python3 test-dynamic-registration.py
 python3 test-lifecycle.py
 ```
 
-### Experimental Tests
+### Go Unit Tests
 
 ```bash
-# Build and run experimental Go tests
-cd tests/experimental
-go run test-tool-discovery.go
+# Run all Go tests
+go test ./...
+
+# Run with verbose output
+go test -v ./...
 ```
 
 ## Test Servers

@@ -1,10 +1,7 @@
 # Test Organization Summary
 
-## Reorganization Completed
+## Directory Structure
 
-The test suite has been reorganized into a clear, maintainable structure:
-
-### Directory Structure
 ```
 tests/
 ├── README.md              # Test documentation
@@ -24,56 +21,43 @@ tests/
 │   ├── test-dynamic-config.yaml
 │   ├── test-empty-config.yaml
 │   └── test-filesystem-config.yaml
-├── scripts/              # Test utility scripts
-│   └── test-playback.sh
-└── experimental/         # Experimental/investigation scripts
-    ├── test-mcp-client-final.go
-    ├── test-tool-discovery.go
-    ├── test-dynamic-registration.go
-    ├── test-dynamic-registration-simple.go
-    ├── test-concurrent-servers.go
-    └── test-tool-proxy.go
+└── scripts/               # Test utility scripts
+    └── test-playback.sh
 ```
 
-### Changes Made
+## Test Categories
 
-1. **Created organized directory structure**
-   - `integration/` for main integration tests
-   - `config-fixtures/` for test configuration files
-   - `scripts/` for utility scripts
-   - `experimental/` for investigation/experimental code
+### Integration Tests (`integration/`)
 
-2. **Updated all test scripts**
-   - Fixed relative paths to use `../../` prefix
-   - Updated binary references from `./mcp-server` to `../../mcp-debug`
-   - Updated config file paths to use `../config-fixtures/`
+Python-based integration tests that verify the full MCP Debug system:
 
-3. **Removed duplicate/unnecessary files**
-   - Removed `test-mcp-client.go` (older version)
-   - Removed `test-mcp-client-fixed.go` (intermediate version)
-   - Kept `test-mcp-client-final.go` (final version)
-   - Removed old test executables from root
+- **test-proxy-calls.py** - Verifies tool forwarding through the proxy
+- **test-dynamic-registration.py** - Tests adding/removing servers at runtime
+- **test-lifecycle.py** - Tests server connect/disconnect/reconnect workflows
+- **test-simple-dynamic.py** - Basic dynamic registration verification
+- **test-updated-tools.py** - Tests tool updates after server changes
 
-4. **Created test infrastructure**
-   - Added `run-all-tests.sh` master test runner
-   - Added comprehensive `README.md` with usage instructions
-   - All tests now work from their new locations
+### Configuration Fixtures (`config-fixtures/`)
 
-### Running Tests
+YAML configuration files used by integration tests to set up various server scenarios.
+
+## Running Tests
 
 From the `tests/` directory:
+
 ```bash
 # Run all tests
 ./run-all-tests.sh
 
 # Run specific test category
 cd integration && python3 test-proxy-calls.py
+
+# Run Go unit tests
+go test ./...
 ```
 
-### Benefits
+## Notes
 
-1. **Clear organization** - Easy to find and understand test types
-2. **Maintainable** - Tests grouped by purpose
-3. **Portable** - All paths are relative to test location
-4. **Documented** - Clear README and usage instructions
-5. **Automated** - Master test runner for CI/CD integration
+- The MCP SDK (mark3labs/mcp-go v0.43+) supports dynamic tool registration via `AddTool()`, `DeleteTools()`, and `SetTools()` methods
+- Tests assume the main binary is built at `../../mcp-debug`
+- Config fixtures use relative paths from the integration directory

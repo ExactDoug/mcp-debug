@@ -1,0 +1,41 @@
+{
+  "name": "mcp-debug",
+  "version": "1.0.0",
+  "description": "A debugging and development tool for MCP servers with hot-swapping, session recording, and automated playback testing",
+  "main": "index.js",
+  "bin": {
+    "mcp-debug": "bin.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/standardbeagle/mcp-debug.git"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "debugging",
+    "development",
+    "proxy",
+    "hot-swap",
+    "recording",
+    "playback"
+  ],
+  "author": "StandardBeagle",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/standardbeagle/mcp-debug/issues"
+  },
+  "homepage": "https://github.com/standardbeagle/mcp-debug#readme",
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin.js",
+    "index.js",
+    "install.js",
+    "README.md"
+  ]
+}
