@@ -111,7 +111,7 @@ jobs:
             uvx mcp-debug --help
 
             # Using npx (Node.js)
-            npx mcp-debug --help
+            npx @standardbeagle/mcp-debug --help
 
             # Direct binary download (Linux amd64)
             curl -L https://github.com/standardbeagle/mcp-debug/releases/download/v${{ steps.version.outputs.VERSION }}/mcp-debug-linux-amd64 -o mcp-debug

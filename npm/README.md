@@ -8,10 +8,10 @@ A debugging and development tool for [Model Context Protocol (MCP)](https://mode
 
 ```bash
 # Run directly with npx (recommended)
-npx mcp-server-debug --help
+npx @standardbeagle/mcp-debug --help
 
 # Or install globally
-npm install -g mcp-server-debug
+npm install -g @standardbeagle/mcp-debug
 mcp-debug --help
 ```
 
@@ -26,19 +26,19 @@ mcp-debug --help
 
 ```bash
 # Start proxy with config
-npx mcp-server-debug --proxy --config config.yaml
+npx @standardbeagle/mcp-debug --proxy --config config.yaml
 
 # Record a session
-npx mcp-server-debug --proxy --config config.yaml --record session.jsonl
+npx @standardbeagle/mcp-debug --proxy --config config.yaml --record session.jsonl
 
 # Playback recorded requests
-npx mcp-server-debug --playback-client session.jsonl | ./your-mcp-server
+npx @standardbeagle/mcp-debug --playback-client session.jsonl | ./your-mcp-server
 ```
 
 ## Programmatic Usage
 
 ```javascript
-const { binaryPath } = require("mcp-debug");
+const { binaryPath } = require("@standardbeagle/mcp-debug");
 const { spawn } = require("child_process");
 
 const child = spawn(binaryPath, ["--proxy", "--config", "config.yaml"]);

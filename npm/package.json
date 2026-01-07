@@ -1,5 +1,5 @@
 {
-  "name": "mcp-server-debug",
+  "name": "@standardbeagle/mcp-debug",
   "version": "1.1.0",
   "mcpName": "io.github.standardbeagle/mcp-debug",
   "description": "A debugging and development tool for MCP servers with hot-swapping, session recording, and automated playback testing",
