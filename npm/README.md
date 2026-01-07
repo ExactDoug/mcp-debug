@@ -1,5 +1,7 @@
 # MCP Debug
 
+<!-- mcp-name: io.github.standardbeagle/mcp-debug -->
+
 A debugging and development tool for [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) servers.
 
 ## Installation
