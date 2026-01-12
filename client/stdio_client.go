@@ -55,8 +55,17 @@ func (c *StdioClient) Connect(ctx context.Context) error {
 	// Create command
 	c.cmd = exec.CommandContext(ctx, c.command, c.args...)
 	if c.env != nil {
-		c.cmd.Env = c.env
+		// Convert []string env to map[string]string for merging
+		overrides := make(map[string]string)
+		for _, entry := range c.env {
+			key, value := splitEnvEntry(entry)
+			if key != "" {
+				overrides[key] = value
+			}
+		}
+		c.cmd.Env = MergeEnvironment(overrides)
 	}
+	// Note: When c.env is nil, c.cmd.Env remains nil (Go's default inheritance)
 	
 	// Create pipes
 	stdin, err := c.cmd.StdinPipe()
