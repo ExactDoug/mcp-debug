@@ -232,9 +232,9 @@ func runDynamicProxyServer(configPath string) error {
 	}
 	
 	log.Printf("Configuration loaded: %d servers configured", len(cfg.Servers))
-	
+
 	// Create dynamic proxy server
-	proxyServer := integration.NewDynamicProxyServer(&cfg.Proxy)
+	proxyServer := integration.NewDynamicProxyServer(cfg)
 	
 	// Set up graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())

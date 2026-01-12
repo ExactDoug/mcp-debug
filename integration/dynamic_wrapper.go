@@ -253,6 +253,11 @@ func (w *DynamicWrapper) handleServerAdd(ctx context.Context, request mcp.CallTo
 	
 	// Create and connect client
 	stdioClient := client.NewStdioClient(name, serverConfig.Command, serverConfig.Args)
+
+	// Use default inheritance (tier1 or proxy defaults)
+	inheritCfg := serverConfig.ResolveInheritConfig(w.proxyServer.config.Inherit)
+	stdioClient.SetInheritConfig(inheritCfg)
+
 	if err := stdioClient.Connect(ctx); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to connect: %v", err)), nil
 	}
@@ -495,6 +500,11 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 	
 	// Create and connect new client
 	stdioClient := client.NewStdioClient(name, serverConfig.Command, serverConfig.Args)
+
+	// Use default inheritance (tier1 or proxy defaults)
+	inheritCfg := serverConfig.ResolveInheritConfig(w.proxyServer.config.Inherit)
+	stdioClient.SetInheritConfig(inheritCfg)
+
 	if err := stdioClient.Connect(ctx); err != nil {
 		// Mark as disconnected but keep tools registered
 		serverInfo.IsConnected = false

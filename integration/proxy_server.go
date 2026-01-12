@@ -177,7 +177,11 @@ func (p *ProxyServer) createAndConnectClient(ctx context.Context, serverName str
 	switch serverConfig.Transport {
 	case "stdio":
 		stdioClient := client.NewStdioClient(serverConfig.Name, serverConfig.Command, serverConfig.Args)
-		
+
+		// Set inheritance config
+		inheritCfg := serverConfig.ResolveInheritConfig(p.config.Inherit)
+		stdioClient.SetInheritConfig(inheritCfg)
+
 		// Set environment variables if specified
 		if len(serverConfig.Env) > 0 {
 			var env []string
@@ -186,7 +190,7 @@ func (p *ProxyServer) createAndConnectClient(ctx context.Context, serverName str
 			}
 			stdioClient.SetEnvironment(env)
 		}
-		
+
 		mcpClient = stdioClient
 	default:
 		return nil, fmt.Errorf("unsupported transport: %s", serverConfig.Transport)

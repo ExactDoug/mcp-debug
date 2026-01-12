@@ -7,23 +7,44 @@ import (
 	"time"
 )
 
+// InheritMode defines how environment variables are inherited
+type InheritMode string
+
+const (
+	InheritNone        InheritMode = "none"
+	InheritTier1       InheritMode = "tier1"
+	InheritTier1Tier2  InheritMode = "tier1+tier2"
+	InheritAll         InheritMode = "all"
+)
+
+// InheritConfig controls which environment variables are inherited
+type InheritConfig struct {
+	Mode                    InheritMode `yaml:"mode,omitempty"`
+	Extra                   []string    `yaml:"extra,omitempty"`
+	Prefix                  []string    `yaml:"prefix,omitempty"`
+	Deny                    []string    `yaml:"deny,omitempty"`
+	AllowDeniedIfExplicit   bool        `yaml:"allow_denied_if_explicit,omitempty"`
+}
+
 // ProxyConfig represents the main configuration for the proxy server
 type ProxyConfig struct {
 	Servers []ServerConfig `yaml:"servers"`
 	Proxy   ProxySettings  `yaml:"proxy"`
+	Inherit *InheritConfig `yaml:"inherit,omitempty"`  // NEW: proxy-level defaults
 }
 
 // ServerConfig represents configuration for a remote MCP server
 type ServerConfig struct {
-	Name      string          `yaml:"name"`
-	Prefix    string          `yaml:"prefix"`
-	Transport string          `yaml:"transport"`
-	Command   string          `yaml:"command,omitempty"`
-	Args      []string        `yaml:"args,omitempty"`
+	Name      string            `yaml:"name"`
+	Prefix    string            `yaml:"prefix"`
+	Transport string            `yaml:"transport"`
+	Command   string            `yaml:"command,omitempty"`
+	Args      []string          `yaml:"args,omitempty"`
 	Env       map[string]string `yaml:"env,omitempty"`
-	URL       string          `yaml:"url,omitempty"`
-	Auth      *AuthConfig     `yaml:"auth,omitempty"`
-	Timeout   string          `yaml:"timeout,omitempty"`
+	Inherit   *InheritConfig    `yaml:"inherit,omitempty"`  // NEW: per-server inheritance
+	URL       string            `yaml:"url,omitempty"`
+	Auth      *AuthConfig       `yaml:"auth,omitempty"`
+	Timeout   string            `yaml:"timeout,omitempty"`
 }
 
 // AuthConfig represents authentication configuration
@@ -93,8 +114,15 @@ func (c *ProxyConfig) Validate() error {
 				return fmt.Errorf("server %s: invalid timeout format: %w", server.Name, err)
 			}
 		}
+
+		// Validate server-level inherit config
+		if server.Inherit != nil {
+			if err := server.Inherit.Validate(); err != nil {
+				return fmt.Errorf("server %s: inherit: %w", server.Name, err)
+			}
+		}
 	}
-	
+
 	// Validate proxy settings
 	if c.Proxy.HealthCheckInterval != "" {
 		if _, err := time.ParseDuration(c.Proxy.HealthCheckInterval); err != nil {
@@ -107,37 +135,69 @@ func (c *ProxyConfig) Validate() error {
 			return fmt.Errorf("invalid connectionTimeout format: %w", err)
 		}
 	}
-	
+
+	// Validate proxy-level inherit config
+	if c.Inherit != nil {
+		if err := c.Inherit.Validate(); err != nil {
+			return fmt.Errorf("proxy.inherit: %w", err)
+		}
+	}
+
 	return nil
 }
 
 // ExpandEnvVars expands environment variables in configuration values
 func (c *ProxyConfig) ExpandEnvVars() {
+	// Expand proxy-level inheritance config
+	expandInheritConfig(c.Inherit)
+
 	for i := range c.Servers {
 		server := &c.Servers[i]
-		
+
 		// Expand command
 		server.Command = expandEnvVar(server.Command)
-		
+
 		// Expand args
 		for j := range server.Args {
 			server.Args[j] = expandEnvVar(server.Args[j])
 		}
-		
+
 		// Expand environment variables
 		for key, value := range server.Env {
 			server.Env[key] = expandEnvVar(value)
 		}
-		
+
 		// Expand URL
 		server.URL = expandEnvVar(server.URL)
-		
+
 		// Expand auth fields
 		if server.Auth != nil {
 			server.Auth.Token = expandEnvVar(server.Auth.Token)
 			server.Auth.Username = expandEnvVar(server.Auth.Username)
 			server.Auth.Password = expandEnvVar(server.Auth.Password)
 		}
+
+		// Expand server-level inheritance config
+		expandInheritConfig(server.Inherit)
+	}
+}
+
+// expandInheritConfig expands environment variables in InheritConfig fields
+func expandInheritConfig(ic *InheritConfig) {
+	if ic == nil {
+		return
+	}
+
+	for i := range ic.Extra {
+		ic.Extra[i] = expandEnvVar(ic.Extra[i])
+	}
+
+	for i := range ic.Prefix {
+		ic.Prefix[i] = expandEnvVar(ic.Prefix[i])
+	}
+
+	for i := range ic.Deny {
+		ic.Deny[i] = expandEnvVar(ic.Deny[i])
 	}
 }
 
@@ -172,7 +232,7 @@ func (s *ServerConfig) GetServerTimeout() time.Duration {
 // GetProxySettings returns proxy settings with defaults
 func (c *ProxyConfig) GetProxySettings() ProxySettings {
 	settings := c.Proxy
-	
+
 	// Apply defaults
 	if settings.HealthCheckInterval == "" {
 		settings.HealthCheckInterval = "30s"
@@ -183,6 +243,36 @@ func (c *ProxyConfig) GetProxySettings() ProxySettings {
 	if settings.MaxRetries == 0 {
 		settings.MaxRetries = 3
 	}
-	
+
 	return settings
+}
+
+// ResolveInheritConfig returns the effective inheritance config for a server.
+// Server-level config overrides proxy-level defaults.
+func (s *ServerConfig) ResolveInheritConfig(proxyDefault *InheritConfig) *InheritConfig {
+	if s.Inherit != nil {
+		return s.Inherit
+	}
+	if proxyDefault != nil {
+		return proxyDefault
+	}
+	// Hardcoded default: tier1 mode
+	return &InheritConfig{
+		Mode: InheritTier1,
+	}
+}
+
+// Validate checks that the inheritance configuration is valid
+func (ic *InheritConfig) Validate() error {
+	// Validate mode
+	switch ic.Mode {
+	case "", InheritNone, InheritTier1, InheritTier1Tier2, InheritAll:
+		// Valid modes (empty defaults to tier1)
+	default:
+		return fmt.Errorf("invalid mode %q: must be one of: none, tier1, tier1+tier2, all", ic.Mode)
+	}
+
+	// Note: mode=none with extras/prefix is valid (inherit nothing except explicitly requested vars)
+
+	return nil
 }

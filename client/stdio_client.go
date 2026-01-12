@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"sync"
 	"time"
+
+	"mcp-debug/config"
 )
 
 // StdioClient implements MCPClient using stdio transport
@@ -17,13 +19,14 @@ type StdioClient struct {
 	command    string
 	args       []string
 	env        []string
-	
+	inheritCfg *config.InheritConfig  // NEW: inheritance configuration
+
 	cmd      *exec.Cmd
 	stdin    io.WriteCloser
 	stdout   io.ReadCloser
 	reader   *bufio.Reader
 	idGen    *RequestIDGenerator
-	
+
 	connected bool
 	mu        sync.Mutex
 }
@@ -43,6 +46,11 @@ func (c *StdioClient) SetEnvironment(env []string) {
 	c.env = env
 }
 
+// SetInheritConfig sets the inheritance configuration for environment variables
+func (c *StdioClient) SetInheritConfig(cfg *config.InheritConfig) {
+	c.inheritCfg = cfg
+}
+
 // Connect establishes connection to the MCP server
 func (c *StdioClient) Connect(ctx context.Context) error {
 	c.mu.Lock()
@@ -54,18 +62,28 @@ func (c *StdioClient) Connect(ctx context.Context) error {
 	
 	// Create command
 	c.cmd = exec.CommandContext(ctx, c.command, c.args...)
-	if c.env != nil {
-		// Convert []string env to map[string]string for merging
+	if c.env != nil || c.inheritCfg != nil {
+		// Convert []string env to map[string]string for overrides
 		overrides := make(map[string]string)
-		for _, entry := range c.env {
-			key, value := splitEnvEntry(entry)
-			if key != "" {
-				overrides[key] = value
+		if c.env != nil {
+			for _, entry := range c.env {
+				key, value := splitEnvEntry(entry)
+				if key != "" {
+					overrides[key] = value
+				}
 			}
 		}
-		c.cmd.Env = MergeEnvironment(overrides)
+
+		// Build a minimal ServerConfig with environment overrides and inheritance config
+		serverConfig := &config.ServerConfig{
+			Env:     overrides,
+			Inherit: c.inheritCfg,
+		}
+
+		// BuildEnvironment handles defaulting to tier1 if Inherit is nil
+		c.cmd.Env = BuildEnvironment(serverConfig, nil)
 	}
-	// Note: When c.env is nil, c.cmd.Env remains nil (Go's default inheritance)
+	// Note: When both c.env and c.inheritCfg are nil, c.cmd.Env stays nil (Go's default)
 	
 	// Create pipes
 	stdin, err := c.cmd.StdinPipe()

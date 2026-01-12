@@ -27,11 +27,12 @@ type DynamicProxyServer struct {
 	clients       map[string]client.MCPClient // server name -> client
 	serverConfigs map[string]config.ServerConfig // server name -> config
 	toolRegistry  map[string][]string // server name -> list of tool names
+	config        *config.ProxyConfig // Full proxy config including Inherit settings
 	mu            sync.RWMutex
 }
 
 // NewDynamicProxyServer creates a new dynamic proxy server
-func NewDynamicProxyServer(cfg *config.ProxySettings) *DynamicProxyServer {
+func NewDynamicProxyServer(cfg *config.ProxyConfig) *DynamicProxyServer {
 	// Create MCP server with stdio transport
 	mcpServer := mcp_golang.NewServer(
 		stdio.NewStdioServerTransport(),
@@ -45,6 +46,7 @@ func NewDynamicProxyServer(cfg *config.ProxySettings) *DynamicProxyServer {
 		clients:       make(map[string]client.MCPClient),
 		serverConfigs: make(map[string]config.ServerConfig),
 		toolRegistry:  make(map[string][]string),
+		config:        cfg,
 	}
 }
 
@@ -327,6 +329,11 @@ func (p *DynamicProxyServer) createAndConnectClient(ctx context.Context, serverC
 	switch serverConfig.Transport {
 	case "stdio":
 		stdioClient := client.NewStdioClient(serverConfig.Name, serverConfig.Command, serverConfig.Args)
+
+		// Set inheritance config
+		inheritCfg := serverConfig.ResolveInheritConfig(p.config.Inherit)
+		stdioClient.SetInheritConfig(inheritCfg)
+
 		if serverConfig.Env != nil {
 			// Convert map[string]string to []string
 			envSlice := make([]string, 0, len(serverConfig.Env))
