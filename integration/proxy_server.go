@@ -47,13 +47,16 @@ func (p *ProxyServer) Initialize(ctx context.Context) error {
 	}
 	
 	log.Println("Initializing Dynamic MCP Proxy Server...")
-	
-	// Create MCP server instance
-	p.mcpServer = server.NewMCPServer(
-		"Dynamic MCP Proxy",
-		"1.0.0",
-		server.WithToolCapabilities(true),
-	)
+
+	// Create MCP server instance ONLY if one doesn't exist
+	// (DynamicWrapper pre-assigns this before calling Initialize)
+	if p.mcpServer == nil {
+		p.mcpServer = server.NewMCPServer(
+			"Dynamic MCP Proxy",
+			"1.0.0",
+			server.WithToolCapabilities(true),
+		)
+	}
 	
 	// Discover tools from all configured servers
 	log.Println("Discovering tools from remote servers...")
