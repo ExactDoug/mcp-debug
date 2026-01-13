@@ -86,7 +86,8 @@ func NewDynamicWrapper(cfg *config.ProxyConfig) *DynamicWrapper {
 func (w *DynamicWrapper) EnableRecording(filename string) error {
 	w.recordMu.Lock()
 	defer w.recordMu.Unlock()
-	
+
+
 	if w.recordEnabled {
 		return fmt.Errorf("recording already enabled")
 	}
@@ -109,7 +110,10 @@ func (w *DynamicWrapper) EnableRecording(filename string) error {
 	headerBytes, _ := json.Marshal(session)
 	fmt.Fprintf(file, "# MCP Recording Session\n# Started: %s\n%s\n",
 		session.StartTime.Format(time.RFC3339), string(headerBytes))
-	
+
+	// Inject recorder into proxy server for static server recording
+	w.proxyServer.recorderFunc = w.recordMessage
+
 	log.Printf("Recording enabled to: %s", filename)
 	return nil
 }
