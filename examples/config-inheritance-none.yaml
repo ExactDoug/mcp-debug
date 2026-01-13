@@ -1,0 +1,171 @@
+# Minimal Environment Inheritance Example (mode: none)
+# DRAFT - Not yet tested with real-world MCP servers
+#
+# This example demonstrates mode: none, which provides maximum isolation
+# by inheriting no environment variables automatically. Only explicitly
+# defined variables in the env: block are passed to the server.
+#
+# Security: This is the most secure mode, providing complete control over
+# what environment the server sees. Use for untrusted servers or when you
+# need guaranteed isolation.
+#
+# See ../DRAFT_ENV_INHERITANCE.md for complete documentation.
+
+servers:
+  # Example 1: Complete isolation with explicit configuration
+  - name: isolated-server
+    transport: stdio
+    command: python3
+    args: ["-m", "untrusted_mcp_server"]
+    inherit:
+      mode: none  # No automatic inheritance
+    env:
+      # Only these variables will be set in the server environment
+      PATH: "/usr/local/bin:/usr/bin:/bin"
+      HOME: "/tmp/isolated-home"
+      PYTHONPATH: "/opt/mcp-servers/lib"
+      LOG_LEVEL: "warning"
+      ENVIRONMENT: "isolated"
+    #
+    # Inherited variables:
+    #   - ONLY the five variables defined in env: above
+    #   - Nothing from parent environment
+    #
+    # Use case: Maximum security for untrusted or experimental servers
+
+  # Example 2: Minimal with explicit extras (still isolated from most vars)
+  - name: semi-isolated-server
+    transport: stdio
+    command: node
+    args: ["server.js"]
+    inherit:
+      mode: none
+      extra:
+        # These specific variables will be inherited IF they exist
+        - PATH
+        - HOME
+        - NODE_ENV
+    env:
+      # Explicit overrides (always set)
+      SERVICE_NAME: "isolated-node-server"
+      PORT: "3000"
+    #
+    # Inherited variables:
+    #   - PATH, HOME, NODE_ENV (if they exist in parent)
+    #   - SERVICE_NAME, PORT (explicit overrides)
+    #   - Nothing else from parent environment
+    #
+    # Note: This is similar to tier1, but you have explicit control
+    # over exactly which variables are allowed
+
+  # Example 3: Multi-tenant isolation
+  - name: tenant-a
+    transport: stdio
+    command: python3
+    args: ["-m", "tenant_server", "--tenant=a"]
+    inherit:
+      mode: none
+    env:
+      TENANT_ID: "a"
+      DB_URL: "postgresql://tenant-a-db/production"
+      STORAGE_PATH: "/data/tenant-a"
+      API_KEY: "${TENANT_A_API_KEY}"  # Expanded from parent
+      MAX_CONNECTIONS: "10"
+    #
+    # Inherited variables:
+    #   - Only the env: block above
+    #   - TENANT_A_API_KEY is expanded from parent but not directly inherited
+    #
+    # Use case: Multi-tenant architecture where tenants must be completely
+    #           isolated from each other's configuration
+
+  - name: tenant-b
+    transport: stdio
+    command: python3
+    args: ["-m", "tenant_server", "--tenant=b"]
+    inherit:
+      mode: none
+    env:
+      TENANT_ID: "b"
+      DB_URL: "postgresql://tenant-b-db/production"
+      STORAGE_PATH: "/data/tenant-b"
+      API_KEY: "${TENANT_B_API_KEY}"
+      MAX_CONNECTIONS: "10"
+    #
+    # Tenant B has identical structure but different configuration.
+    # Complete isolation ensures tenant A cannot see tenant B's credentials.
+
+  # Example 4: Testing server with controlled environment
+  - name: test-server
+    transport: stdio
+    command: python3
+    args: ["-m", "pytest", "-v"]
+    inherit:
+      mode: none
+    env:
+      # Minimal testing environment
+      PATH: "/usr/local/bin:/usr/bin:/bin"
+      HOME: "/tmp/test-home"
+      PYTHONPATH: "/workspace/tests"
+      PYTEST_CURRENT_TEST: "true"
+      TEST_ENVIRONMENT: "isolated"
+      # No access to production credentials or secrets
+    #
+    # Use case: Running tests in isolated environment to ensure they
+    #           don't depend on local environment variables
+
+  # Example 5: Containerized server simulation
+  - name: container-like-server
+    transport: stdio
+    command: python3
+    args: ["-m", "containerized_server"]
+    inherit:
+      mode: none
+      extra:
+        # Minimal set similar to container defaults
+        - PATH
+        - HOME
+    env:
+      # Container-like environment
+      HOSTNAME: "mcp-server-container"
+      ENVIRONMENT: "production"
+      LOG_FORMAT: "json"
+      TZ: "UTC"
+    #
+    # Inherited variables:
+    #   - PATH, HOME (if present)
+    #   - HOSTNAME, ENVIRONMENT, LOG_FORMAT, TZ (explicit)
+    #
+    # Use case: Simulating a containerized environment where the server
+    #           gets a minimal, controlled environment
+
+  # Example 6: Mode none but allow denied if explicit
+  - name: isolated-with-escape-hatch
+    transport: stdio
+    command: python3
+    args: ["-m", "special_server"]
+    inherit:
+      mode: none
+      extra:
+        - PATH
+        - HOME
+        - http_proxy  # Normally in implicit denylist
+        - https_proxy
+      allow_denied_if_explicit: true  # Allow proxy vars despite denylist
+    env:
+      CONFIG_FILE: "/etc/special-server/config.yaml"
+    #
+    # Inherited variables:
+    #   - PATH, HOME (if present)
+    #   - http_proxy, https_proxy (if present, despite denylist)
+    #   - CONFIG_FILE (explicit)
+    #
+    # Use case: Isolated server that needs proxy access but nothing else
+
+proxy:
+  healthCheckInterval: "30s"
+  connectionTimeout: "10s"
+  maxRetries: 3
+
+# Note: No proxy.inherit block specified. In mode: none, this doesn't
+# matter since servers explicitly disable all inheritance anyway.

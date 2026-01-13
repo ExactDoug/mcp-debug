@@ -116,6 +116,66 @@ MCP_RECORD_FILE="session.jsonl"     # Auto-record sessions
 MCP_CONFIG_PATH="./config.yaml"     # Default config
 ```
 
+## Environment Variable Inheritance (DRAFT)
+
+> **⚠️ DRAFT**: This feature is fully implemented but not yet validated with real-world MCP servers. See [DRAFT_ENV_INHERITANCE.md](DRAFT_ENV_INHERITANCE.md) for complete documentation.
+
+mcp-debug implements a tier-based environment variable inheritance system to prevent accidental leakage of sensitive values (credentials, tokens, SSH agent sockets) to upstream MCP servers.
+
+### Security-First Design
+
+By default, only **Tier 1 baseline variables** (PATH, HOME, USER, SHELL, locale, TMPDIR) are inherited. This prevents inadvertent exposure of:
+- Cloud provider credentials (AWS_ACCESS_KEY_ID, AZURE_CLIENT_SECRET)
+- Authentication tokens (GITHUB_TOKEN, ANTHROPIC_API_KEY)
+- SSH agent sockets (SSH_AUTH_SOCK)
+- Development secrets and corporate credentials
+
+You can control inheritance behavior per-server or set proxy-wide defaults.
+
+### Quick Example
+
+```yaml
+# Secure by default - only baseline variables
+servers:
+  - name: untrusted-server
+    transport: stdio
+    command: python3
+    args: ["-m", "experimental_server"]
+    # No inherit block = tier1 mode (secure default)
+
+# Explicit control for trusted servers
+  - name: trusted-server
+    transport: stdio
+    command: python3
+    args: ["-m", "my_server"]
+    inherit:
+      mode: tier1+tier2  # Add network/TLS variables
+      extra: ["PYTHONPATH", "VIRTUAL_ENV"]  # Explicitly add needed vars
+      prefix: ["MY_APP_"]  # Include all MY_APP_* variables
+      deny: ["SSH_AUTH_SOCK"]  # Block specific variables
+```
+
+### Inheritance Modes
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `none` | No inheritance (only explicit `env:` values) | Maximum isolation |
+| `tier1` | Baseline variables only (DEFAULT) | Most servers |
+| `tier1+tier2` | Baseline + network/TLS variables | Servers making HTTPS requests |
+| `all` | Inherit everything (with optional deny list) | Fully trusted servers |
+
+### Tier Definitions
+
+**Tier 1 (Baseline)**: PATH, HOME, USER, SHELL, LANG, LC_ALL, TZ, TMPDIR, TEMP, TMP
+
+**Tier 2 (Network/TLS)**: SSL_CERT_FILE, SSL_CERT_DIR, REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE, NODE_EXTRA_CA_CERTS
+
+**Implicit Denylist**: HTTP_PROXY, HTTPS_PROXY, http_proxy, https_proxy, NO_PROXY, no_proxy (httpoxy mitigation)
+
+### Complete Documentation
+
+For complete documentation including all configuration options, security rationale, troubleshooting, and advanced use cases, see [DRAFT_ENV_INHERITANCE.md](DRAFT_ENV_INHERITANCE.md).
+
 ## Development Workflow
 
 ```bash

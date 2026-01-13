@@ -1,0 +1,65 @@
+# Basic Environment Inheritance Example
+# DRAFT - Not yet tested with real-world MCP servers
+#
+# This example demonstrates the default tier1 mode, which inherits only
+# baseline environment variables necessary for most programs to function.
+#
+# Security: This is the most secure default mode, preventing leakage of
+# credentials, tokens, and other sensitive environment variables.
+#
+# See ../DRAFT_ENV_INHERITANCE.md for complete documentation.
+
+servers:
+  # Example 1: Default behavior (tier1 implicit)
+  - name: basic-python-server
+    transport: stdio
+    command: python3
+    args: ["-m", "my_python_mcp_server"]
+    # No inherit block specified = tier1 mode (default)
+    #
+    # Inherited variables:
+    #   - PATH, HOME, USER, SHELL (system basics)
+    #   - LANG, LC_ALL, TZ (locale/timezone)
+    #   - TMPDIR, TEMP, TMP (temporary directories)
+    #
+    # NOT inherited:
+    #   - AWS_ACCESS_KEY_ID, GITHUB_TOKEN (credentials)
+    #   - SSH_AUTH_SOCK (SSH agent)
+    #   - Any custom application variables
+
+  # Example 2: Explicit tier1 mode with minimal extras
+  - name: python-with-path
+    transport: stdio
+    command: python3
+    args: ["-m", "another_server"]
+    inherit:
+      mode: tier1  # Explicit (same as default)
+      extra: ["PYTHONPATH"]  # Add one additional variable
+    #
+    # Inherited variables:
+    #   - All tier1 variables (PATH, HOME, USER, etc.)
+    #   - PYTHONPATH (explicitly added)
+    #
+    # Use case: Python server needs custom module path
+
+  # Example 3: Explicit environment overrides
+  - name: configured-server
+    transport: stdio
+    command: node
+    args: ["server.js"]
+    inherit:
+      mode: tier1
+    env:
+      # These explicit overrides are ALWAYS set, regardless of inheritance mode
+      NODE_ENV: "production"
+      LOG_LEVEL: "info"
+      # Expand from parent environment
+      API_KEY: "${MY_API_KEY}"
+    #
+    # Note: env: overrides are never blocked by deny lists
+    # They always win over inherited variables
+
+proxy:
+  healthCheckInterval: "30s"
+  connectionTimeout: "10s"
+  maxRetries: 3

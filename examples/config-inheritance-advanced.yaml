@@ -1,0 +1,178 @@
+# Advanced Environment Inheritance Example
+# DRAFT - Not yet tested with real-world MCP servers
+#
+# This example demonstrates advanced features including:
+#   - mode: all (inherit everything with deny lists)
+#   - allow_denied_if_explicit (override implicit denylist)
+#   - Proxy-level defaults with per-server overrides
+#   - HTTP_PROXY override (httpoxy mitigation bypass)
+#
+# See ../DRAFT_ENV_INHERITANCE.md for complete documentation.
+
+# Proxy-level defaults
+proxy:
+  healthCheckInterval: "30s"
+  connectionTimeout: "10s"
+  maxRetries: 3
+
+  # Default inheritance for all servers
+  inherit:
+    mode: tier1  # Conservative default
+    deny:
+      # Block these variables for ALL servers by default
+      - SSH_AUTH_SOCK
+      - AWS_SESSION_TOKEN
+    # Servers can override this entire config
+
+servers:
+  # Example 1: Trusted in-house server with mode: all
+  - name: trusted-internal-server
+    transport: stdio
+    command: ./internal-server
+    inherit:
+      mode: all  # Inherit everything from parent
+      deny:
+        # Even in mode:all, explicitly block these secrets
+        - AWS_SECRET_ACCESS_KEY
+        - AZURE_CLIENT_SECRET
+        - GITHUB_TOKEN
+        - ANTHROPIC_API_KEY
+        - OPENAI_API_KEY
+    #
+    # Inherited variables:
+    #   - Everything in parent environment
+    #   - EXCEPT the five denied credentials above
+    #   - EXCEPT proxy-level denies (SSH_AUTH_SOCK, AWS_SESSION_TOKEN)
+    #   - EXCEPT implicit denylist (HTTP_PROXY, https_proxy, etc.)
+    #
+    # Use case: Fully trusted internal server that needs broad environment
+    #           access but should never see production API keys
+
+  # Example 2: Corporate proxy server with httpoxy override
+  - name: corporate-proxy-client
+    transport: stdio
+    command: python3
+    args: ["-m", "proxy_aware_server"]
+    inherit:
+      mode: tier1+tier2
+      extra:
+        # Request lowercase proxy variables (safer than uppercase)
+        - http_proxy
+        - https_proxy
+        - no_proxy
+      allow_denied_if_explicit: true  # Allow proxy vars from implicit denylist
+    #
+    # Inherited variables:
+    #   - All tier1 + tier2 variables
+    #   - http_proxy, https_proxy, no_proxy (overriding implicit denylist)
+    #
+    # Security note: We explicitly request lowercase variants (safer) and
+    # set allow_denied_if_explicit to bypass the implicit denylist.
+    # Only do this if you trust the server and need proxy support.
+    #
+    # The uppercase variants (HTTP_PROXY, HTTPS_PROXY) remain blocked
+    # unless explicitly added to 'extra' list.
+    #
+    # Use case: Corporate environment requiring HTTP proxy for outbound
+    #           connections, with trusted MCP server
+
+  # Example 3: Multi-tenant server with complete isolation
+  - name: tenant-a-server
+    transport: stdio
+    command: python3
+    args: ["-m", "multitenant_server"]
+    inherit:
+      mode: none  # No inheritance at all
+    env:
+      # Only these explicitly defined variables are set
+      TENANT_ID: "tenant-a"
+      DB_HOST: "tenant-a-db.internal"
+      DB_NAME: "tenant_a_production"
+      DB_USER: "tenant_a_user"
+      DB_PASSWORD: "${TENANT_A_DB_PASSWORD}"  # Expanded from parent
+      ISOLATION_LEVEL: "maximum"
+    #
+    # Inherited variables:
+    #   - NONE from parent environment
+    #   - Only the env: block values above
+    #
+    # Use case: Multi-tenant architecture requiring complete environment
+    #           isolation between tenants
+
+  # Example 4: Development server with relaxed inheritance
+  - name: dev-server
+    transport: stdio
+    command: python3
+    args: ["-m", "dev_server"]
+    inherit:
+      mode: all  # Inherit everything (convenient for development)
+      deny: []   # Don't deny anything (override proxy defaults)
+      allow_denied_if_explicit: true
+    env:
+      ENVIRONMENT: "development"
+      DEBUG: "true"
+    #
+    # Inherited variables:
+    #   - Everything in parent environment
+    #   - Including SSH_AUTH_SOCK (proxy deny overridden)
+    #   - Including proxy variables (implicit denylist overridden)
+    #
+    # Use case: Local development where you want maximum convenience
+    #           and aren't worried about secret leakage
+    #
+    # WARNING: Never use this configuration for untrusted/experimental
+    #          servers or in production environments
+
+  # Example 5: Minimal server using proxy defaults
+  - name: default-behavior-server
+    transport: stdio
+    command: python3
+    args: ["-m", "basic_server"]
+    # No inherit block = uses proxy.inherit defaults
+    #
+    # Inherited variables:
+    #   - Tier1 (from proxy default mode: tier1)
+    #   - NOT SSH_AUTH_SOCK (from proxy deny list)
+    #   - NOT AWS_SESSION_TOKEN (from proxy deny list)
+    #
+    # Use case: Standard server using secure defaults
+
+  # Example 6: Override proxy defaults for specific server
+  - name: override-proxy-defaults
+    transport: stdio
+    command: node
+    args: ["special-server.js"]
+    inherit:
+      mode: tier1+tier2  # Override proxy's tier1
+      extra:
+        - NODE_ENV
+        - SSH_AUTH_SOCK  # Include despite proxy deny
+      deny:
+        - GITHUB_TOKEN   # Add additional denial
+      allow_denied_if_explicit: true  # Allow SSH_AUTH_SOCK from extra
+    #
+    # Inherited variables:
+    #   - Tier1 + tier2 (overriding proxy default)
+    #   - SSH_AUTH_SOCK (explicitly allowed despite proxy deny)
+    #   - NODE_ENV
+    #   - NOT GITHUB_TOKEN (explicitly denied)
+    #   - NOT AWS_SESSION_TOKEN (still from proxy deny)
+    #
+    # Use case: Server needs SSH for git operations but should never
+    #           see GitHub token (use SSH key instead)
+
+  # Example 7: Testing/debugging server that prints environment
+  - name: env-inspector
+    transport: stdio
+    command: /usr/bin/env  # Prints all environment variables
+    inherit:
+      mode: tier1
+      extra: ["TEST_VAR1", "TEST_VAR2"]
+    #
+    # Use this server to verify what variables are actually inherited.
+    # The /usr/bin/env command prints all environment variables it receives.
+    #
+    # Run: uvx mcp-debug --proxy --config this-file.yaml
+    # Then use server_list or server tools to see output
+    #
+    # Use case: Debugging inheritance configuration

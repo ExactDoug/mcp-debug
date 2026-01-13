@@ -1,0 +1,103 @@
+# Tier1+Tier2 Environment Inheritance Example
+# DRAFT - Not yet tested with real-world MCP servers
+#
+# This example demonstrates tier1+tier2 mode, which adds network and TLS
+# variables to the baseline. Useful for servers making HTTPS requests,
+# especially in enterprise environments with custom CA certificates.
+#
+# See ../DRAFT_ENV_INHERITANCE.md for complete documentation.
+
+servers:
+  # Example 1: API server with TLS support
+  - name: api-client-server
+    transport: stdio
+    command: python3
+    args: ["-m", "api_mcp_server"]
+    inherit:
+      mode: tier1+tier2  # Baseline + network/TLS variables
+      extra:
+        - PYTHONPATH
+        - VIRTUAL_ENV
+    #
+    # Inherited variables:
+    #   Tier 1:
+    #     - PATH, HOME, USER, SHELL
+    #     - LANG, LC_ALL, TZ
+    #     - TMPDIR, TEMP, TMP
+    #   Tier 2:
+    #     - SSL_CERT_FILE, SSL_CERT_DIR (system TLS certs)
+    #     - REQUESTS_CA_BUNDLE (Python requests library)
+    #     - CURL_CA_BUNDLE (curl)
+    #     - NODE_EXTRA_CA_CERTS (Node.js)
+    #   Extra:
+    #     - PYTHONPATH, VIRTUAL_ENV
+    #
+    # Use case: Python server making HTTPS API calls in corporate network
+    #           with custom CA certificates for TLS inspection
+
+  # Example 2: Application-specific variables with prefix matching
+  - name: datto-rmm-server
+    transport: stdio
+    command: python3
+    args: ["-m", "datto_rmm_mcp.server"]
+    inherit:
+      mode: tier1+tier2
+      prefix:
+        - DATTO_    # Inherit all DATTO_* variables
+        - RMM_      # Inherit all RMM_* variables
+      extra:
+        - PYTHONPATH
+      deny:
+        - SSH_AUTH_SOCK  # Block SSH even if somehow matched
+    #
+    # Inherited variables:
+    #   - All tier1 + tier2 variables
+    #   - All variables starting with DATTO_ (e.g., DATTO_API_KEY, DATTO_URL)
+    #   - All variables starting with RMM_
+    #   - PYTHONPATH
+    #   - NOT SSH_AUTH_SOCK (explicitly denied)
+    #
+    # Use case: Application with multiple related environment variables
+    #           that share a common prefix
+
+  # Example 3: Node.js server in enterprise environment
+  - name: node-https-server
+    transport: stdio
+    command: node
+    args: ["enterprise-server.js"]
+    inherit:
+      mode: tier1+tier2
+      extra:
+        - NODE_ENV
+        - NODE_OPTIONS
+        - NPM_CONFIG_REGISTRY  # Corporate npm registry
+      deny:
+        - AWS_ACCESS_KEY_ID    # Prevent cloud credential leakage
+        - AWS_SECRET_ACCESS_KEY
+        - GITHUB_TOKEN
+    env:
+      # Explicit configuration
+      SERVICE_NAME: "mcp-node-server"
+      LOG_LEVEL: "info"
+    #
+    # Inherited variables:
+    #   - All tier1 + tier2 (including NODE_EXTRA_CA_CERTS)
+    #   - NODE_ENV, NODE_OPTIONS, NPM_CONFIG_REGISTRY
+    #   - NOT AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, GITHUB_TOKEN
+    #   - SERVICE_NAME, LOG_LEVEL (explicit overrides)
+    #
+    # Use case: Enterprise Node.js server with custom CA certificates,
+    #           corporate npm registry, but blocking cloud credentials
+
+# Proxy-level defaults (applied to all servers unless overridden)
+proxy:
+  healthCheckInterval: "30s"
+  connectionTimeout: "10s"
+  maxRetries: 3
+
+  # Optional: Set default inheritance for all servers
+  # inherit:
+  #   mode: tier1
+  #   extra: []
+  #
+  # Individual servers can override these defaults

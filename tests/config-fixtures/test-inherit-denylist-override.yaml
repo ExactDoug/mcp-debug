@@ -1,0 +1,65 @@
+# DRAFT TEST FIXTURE - Environment Inheritance
+# Status: Not yet validated with real-world MCP servers
+# Purpose: Test allow_denied_if_explicit flag
+# Expected behavior: Explicitly requested variables in 'extra' can override
+#   deny list when allow_denied_if_explicit is true
+# Created: 2026-01-12
+# Feature: Selective Environment Inheritance (commit 49f5581)
+
+servers:
+  # Test allow_denied_if_explicit flag with explicit override
+  - name: "test-inherit-allow-denied"
+    prefix: "allowdeny"
+    transport: "stdio"
+    command: "/usr/bin/env"  # Prints environment to verify inheritance
+    timeout: "10s"
+    inherit:
+      mode: tier1  # Baseline variables only
+      extra:
+        - HTTP_PROXY       # Normally in implicit denylist
+        - CUSTOM_SECRET    # Also in explicit deny list below
+      deny:
+        - CUSTOM_SECRET    # Explicitly deny this variable
+        - AWS_ACCESS_KEY_ID
+      allow_denied_if_explicit: true  # Allow extras to override denies
+    #
+    # Expected inherited variables:
+    #   - All tier1 variables (PATH, HOME, USER, etc.)
+    #   - HTTP_PROXY (overriding implicit denylist via allow_denied_if_explicit)
+    #   - CUSTOM_SECRET (overriding explicit deny via allow_denied_if_explicit)
+    #   - NOT AWS_ACCESS_KEY_ID (denied but not in extra list)
+    #
+    # Security note: This flag should only be used when you trust the server
+    # and need specific variables from the deny lists (like proxy vars).
+    #
+    # Use case: Corporate proxy server that needs HTTP_PROXY but should
+    #           otherwise follow security best practices
+
+  # Control test: Same config without allow_denied_if_explicit
+  - name: "test-inherit-deny-enforced"
+    prefix: "denyenforce"
+    transport: "stdio"
+    command: "/usr/bin/env"
+    timeout: "10s"
+    inherit:
+      mode: tier1
+      extra:
+        - HTTP_PROXY       # Normally in implicit denylist
+        - CUSTOM_SECRET    # Also in explicit deny list
+      deny:
+        - CUSTOM_SECRET
+        - AWS_ACCESS_KEY_ID
+      # allow_denied_if_explicit: false (default)
+    #
+    # Expected inherited variables:
+    #   - All tier1 variables (PATH, HOME, USER, etc.)
+    #   - NOT HTTP_PROXY (implicit denylist blocks it)
+    #   - NOT CUSTOM_SECRET (explicit deny blocks it)
+    #   - NOT AWS_ACCESS_KEY_ID (explicitly denied)
+    #
+    # Use case: Verify that without the flag, deny lists are enforced
+
+proxy:
+  healthCheckInterval: "30s"
+  connectionTimeout: "10s"
+  maxRetries: 3
