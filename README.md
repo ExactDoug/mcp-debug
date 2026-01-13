@@ -20,9 +20,12 @@ MCP Debug enables rapid development and testing of MCP servers with hot-swapping
 
 ### Session Recording & Playback
 - Record JSON-RPC traffic for debugging and documentation
+- Records all tool calls (static and dynamic servers)
+- Records management operations (server_add, etc.)
 - Playback client mode - replay requests to test servers
 - Playback server mode - replay responses to test clients
 - Regression testing with recorded sessions
+- **[📖 Recording Documentation](docs/RECORDING.md)** - Complete recording guide
 
 ### Development Proxy
 - Multi-server aggregation with tool prefixing
@@ -88,6 +91,8 @@ uvx mcp-debug --playback-client session.jsonl | ./your-mcp-server
 # Replay recorded responses to test a client
 mcp-tui uvx mcp-debug --playback-server session.jsonl
 ```
+
+**See [Recording Documentation](docs/RECORDING.md) for detailed recording format, workflows, and examples.**
 
 ## Configuration
 
