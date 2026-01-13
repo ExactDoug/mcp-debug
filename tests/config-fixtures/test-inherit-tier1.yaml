@@ -1,0 +1,50 @@
+# DRAFT TEST FIXTURE - Environment Inheritance
+# Status: Not yet validated with real-world MCP servers
+# Purpose: Test basic tier1 mode (default behavior)
+# Expected behavior: Server should inherit only baseline tier1 variables
+#   - PATH, HOME, USER, SHELL, LOGNAME
+#   - LANG, LC_ALL, LC_*, TZ
+#   - TMPDIR, TEMP, TMP
+# Created: 2026-01-12
+# Feature: Selective Environment Inheritance (commit 49f5581)
+
+servers:
+  # Test tier1 default inheritance (implicit mode)
+  - name: "test-inherit-tier1-implicit"
+    prefix: "tier1"
+    transport: "stdio"
+    command: "/usr/bin/env"  # Prints environment to verify inheritance
+    timeout: "10s"
+    # No inherit block specified = tier1 mode (default)
+    #
+    # Expected inherited variables:
+    #   - System basics: PATH, HOME, USER, SHELL, LOGNAME
+    #   - Locale/timezone: LANG, LC_ALL, LC_*, TZ
+    #   - Temp directories: TMPDIR, TEMP, TMP
+    #
+    # Expected NOT inherited:
+    #   - Credentials: AWS_*, GITHUB_TOKEN, ANTHROPIC_API_KEY, etc.
+    #   - SSH: SSH_AUTH_SOCK, SSH_AGENT_PID
+    #   - Network: HTTP_PROXY, http_proxy, no_proxy
+    #   - Custom application variables
+
+  # Test explicit tier1 mode with single extra variable
+  - name: "test-inherit-tier1-explicit"
+    prefix: "tier1ex"
+    transport: "stdio"
+    command: "/usr/bin/env"
+    timeout: "10s"
+    inherit:
+      mode: tier1  # Explicit specification
+      extra: ["PYTHONPATH"]  # Add one additional variable
+    #
+    # Expected inherited variables:
+    #   - All tier1 variables (same as above)
+    #   - PYTHONPATH (if set in parent environment)
+    #
+    # Use case: Verify explicit tier1 mode works identically to implicit
+
+proxy:
+  healthCheckInterval: "30s"
+  connectionTimeout: "10s"
+  maxRetries: 3

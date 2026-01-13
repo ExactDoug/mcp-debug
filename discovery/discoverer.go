@@ -126,7 +126,11 @@ func (d *Discoverer) discoverServer(ctx context.Context, serverConfig config.Ser
 // createStdioClient creates a stdio-based MCP client
 func (d *Discoverer) createStdioClient(serverConfig config.ServerConfig) (client.MCPClient, error) {
 	stdioClient := client.NewStdioClient(serverConfig.Name, serverConfig.Command, serverConfig.Args)
-	
+
+	// Set inheritance config
+	inheritCfg := serverConfig.ResolveInheritConfig(d.config.Inherit)
+	stdioClient.SetInheritConfig(inheritCfg)
+
 	// Set environment variables if specified
 	if len(serverConfig.Env) > 0 {
 		var env []string

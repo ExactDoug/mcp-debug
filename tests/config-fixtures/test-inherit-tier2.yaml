@@ -1,0 +1,51 @@
+# DRAFT TEST FIXTURE - Environment Inheritance
+# Status: Not yet validated with real-world MCP servers
+# Purpose: Test tier1+tier2 mode with extras, prefix, and deny list
+# Expected behavior: Server should inherit tier1 + tier2 variables, plus:
+#   - Extra variables: PYTHONPATH, VIRTUAL_ENV
+#   - Variables matching prefix: TEST_*
+#   - Except denied: SSH_AUTH_SOCK
+# Created: 2026-01-12
+# Feature: Selective Environment Inheritance (commit 49f5581)
+
+servers:
+  # Test tier1+tier2 with comprehensive configuration
+  - name: "test-inherit-tier2-comprehensive"
+    prefix: "tier2"
+    transport: "stdio"
+    command: "/usr/bin/env"  # Prints environment to verify inheritance
+    timeout: "10s"
+    inherit:
+      mode: tier1+tier2  # Baseline + network/TLS variables
+      extra:
+        - PYTHONPATH     # Python module path
+        - VIRTUAL_ENV    # Virtual environment
+      prefix:
+        - TEST_          # All TEST_* variables (for testing)
+      deny:
+        - SSH_AUTH_SOCK  # Block SSH agent even if somehow matched
+    #
+    # Expected inherited variables:
+    #   Tier 1 (baseline):
+    #     - PATH, HOME, USER, SHELL, LOGNAME
+    #     - LANG, LC_ALL, LC_*, TZ
+    #     - TMPDIR, TEMP, TMP
+    #   Tier 2 (network/TLS):
+    #     - SSL_CERT_FILE, SSL_CERT_DIR (system TLS certificates)
+    #     - REQUESTS_CA_BUNDLE (Python requests library)
+    #     - CURL_CA_BUNDLE (curl)
+    #     - NODE_EXTRA_CA_CERTS (Node.js)
+    #   Extra:
+    #     - PYTHONPATH (if set in parent)
+    #     - VIRTUAL_ENV (if set in parent)
+    #   Prefix:
+    #     - All TEST_* variables (e.g., TEST_VAR1, TEST_CONFIG, etc.)
+    #   Denied:
+    #     - NOT SSH_AUTH_SOCK (explicitly blocked)
+    #
+    # Use case: Comprehensive test of tier2, extras, prefix matching, and deny list
+
+proxy:
+  healthCheckInterval: "30s"
+  connectionTimeout: "10s"
+  maxRetries: 3

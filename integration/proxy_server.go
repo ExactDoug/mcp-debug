@@ -22,7 +22,8 @@ type ProxyServer struct {
 	registry     *proxy.ToolRegistry
 	clients      []client.MCPClient
 	discoverer   *discovery.Discoverer
-	
+	recorderFunc proxy.RecorderFunc // Optional recorder for tool call traffic
+
 	mu           sync.RWMutex
 	initialized  bool
 }
@@ -47,13 +48,16 @@ func (p *ProxyServer) Initialize(ctx context.Context) error {
 	}
 	
 	log.Println("Initializing Dynamic MCP Proxy Server...")
-	
-	// Create MCP server instance
-	p.mcpServer = server.NewMCPServer(
-		"Dynamic MCP Proxy",
-		"1.0.0",
-		server.WithToolCapabilities(true),
-	)
+
+	// Create MCP server instance ONLY if one doesn't exist
+	// (DynamicWrapper pre-assigns this before calling Initialize)
+	if p.mcpServer == nil {
+		p.mcpServer = server.NewMCPServer(
+			"Dynamic MCP Proxy",
+			"1.0.0",
+			server.WithToolCapabilities(true),
+		)
+	}
 	
 	// Discover tools from all configured servers
 	log.Println("Discovering tools from remote servers...")
@@ -92,16 +96,16 @@ func (p *ProxyServer) Initialize(ctx context.Context) error {
 		// Register tools and create handlers
 		for _, tool := range result.Tools {
 			p.registry.RegisterTool(tool, mcpClient)
-			
+
 			// Create MCP tool definition
 			mcpTool := p.createMCPTool(tool)
-			
-			// Create proxy handler
-			handler := proxy.CreateProxyHandler(mcpClient, tool)
-			
+
+			// Create proxy handler with optional recorder
+			handler := proxy.CreateProxyHandler(mcpClient, tool, p.recorderFunc)
+
 			// Register with MCP server
 			p.mcpServer.AddTool(mcpTool, handler)
-			
+
 			log.Printf("Registered tool: %s", tool.PrefixedName)
 		}
 	}
@@ -177,7 +181,11 @@ func (p *ProxyServer) createAndConnectClient(ctx context.Context, serverName str
 	switch serverConfig.Transport {
 	case "stdio":
 		stdioClient := client.NewStdioClient(serverConfig.Name, serverConfig.Command, serverConfig.Args)
-		
+
+		// Set inheritance config
+		inheritCfg := serverConfig.ResolveInheritConfig(p.config.Inherit)
+		stdioClient.SetInheritConfig(inheritCfg)
+
 		// Set environment variables if specified
 		if len(serverConfig.Env) > 0 {
 			var env []string
@@ -186,7 +194,7 @@ func (p *ProxyServer) createAndConnectClient(ctx context.Context, serverName str
 			}
 			stdioClient.SetEnvironment(env)
 		}
-		
+
 		mcpClient = stdioClient
 	default:
 		return nil, fmt.Errorf("unsupported transport: %s", serverConfig.Transport)

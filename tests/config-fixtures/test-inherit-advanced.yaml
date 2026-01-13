@@ -1,0 +1,78 @@
+# DRAFT TEST FIXTURE - Environment Inheritance
+# Status: Not yet validated with real-world MCP servers
+# Purpose: Test proxy-level defaults with server-level overrides
+# Expected behavior: Verify configuration resolution chain:
+#   1. Proxy defaults apply to servers without inherit config
+#   2. Servers can override proxy defaults
+#   3. mode: none provides maximum isolation
+# Created: 2026-01-12
+# Feature: Selective Environment Inheritance (commit 49f5581)
+
+proxy:
+  healthCheckInterval: "30s"
+  connectionTimeout: "10s"
+  maxRetries: 3
+
+  # Proxy-level inheritance defaults
+  inherit:
+    mode: tier1  # Default for all servers
+    deny:
+      - SSH_AUTH_SOCK  # Block SSH agent by default
+      - AWS_SESSION_TOKEN
+
+servers:
+  # Server 1: Uses proxy defaults (no inherit block)
+  - name: "test-inherit-proxy-defaults"
+    prefix: "default"
+    transport: "stdio"
+    command: "/usr/bin/env"
+    timeout: "10s"
+    # No inherit block = uses proxy.inherit defaults
+    #
+    # Expected inherited variables:
+    #   - Tier1 (from proxy default mode: tier1)
+    #   - NOT SSH_AUTH_SOCK (from proxy deny list)
+    #   - NOT AWS_SESSION_TOKEN (from proxy deny list)
+    #
+    # Use case: Verify proxy defaults are applied correctly
+
+  # Server 2: Overrides proxy defaults with tier2 + extras
+  - name: "test-inherit-override-tier2"
+    prefix: "override"
+    transport: "stdio"
+    command: "/usr/bin/env"
+    timeout: "10s"
+    inherit:
+      mode: tier1+tier2  # Override proxy's tier1
+      extra:
+        - PYTHONPATH
+        - NODE_ENV
+      deny:
+        - GITHUB_TOKEN   # Add server-specific denial
+    #
+    # Expected inherited variables:
+    #   - Tier1 + tier2 (overriding proxy default)
+    #   - PYTHONPATH, NODE_ENV (extras)
+    #   - NOT GITHUB_TOKEN (server-level deny)
+    #   - NOT SSH_AUTH_SOCK, AWS_SESSION_TOKEN (proxy-level deny still applies)
+    #
+    # Use case: Verify server config overrides proxy defaults
+
+  # Server 3: Maximum isolation with mode: none
+  - name: "test-inherit-isolation"
+    prefix: "isolated"
+    transport: "stdio"
+    command: "/usr/bin/env"
+    timeout: "10s"
+    inherit:
+      mode: none  # No inheritance at all
+    env:
+      # Only these explicit variables are set
+      ISOLATION_TEST: "true"
+      SERVER_NAME: "test-inherit-isolation"
+    #
+    # Expected inherited variables:
+    #   - NONE from parent environment
+    #   - Only env: block values (ISOLATION_TEST, SERVER_NAME)
+    #
+    # Use case: Verify mode: none provides complete isolation

@@ -3,33 +3,55 @@ package proxy
 import (
 	"context"
 	"fmt"
-	
+
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	
+
 	"mcp-debug/client"
 	"mcp-debug/discovery"
 )
 
+// RecorderFunc is a function that records JSON-RPC messages with metadata
+type RecorderFunc func(direction, messageType, toolName, serverName string, message interface{})
+
 // CreateProxyHandler creates a handler that forwards tool calls to remote servers
-func CreateProxyHandler(mcpClient client.MCPClient, remoteTool discovery.RemoteTool) server.ToolHandlerFunc {
+// The optional recorder function enables recording of tool call traffic
+func CreateProxyHandler(mcpClient client.MCPClient, remoteTool discovery.RemoteTool, recorder RecorderFunc) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Record the request if recorder is provided
+		if recorder != nil {
+			recorder("request", "tool_call", remoteTool.PrefixedName, remoteTool.ServerName, request)
+		}
 		// Extract arguments from the request
 		args, err := extractArguments(request)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to extract arguments: %v", err)), nil
+			errResult := mcp.NewToolResultError(fmt.Sprintf("Failed to extract arguments: %v", err))
+			if recorder != nil {
+				recorder("response", "tool_call", remoteTool.PrefixedName, remoteTool.ServerName, errResult)
+			}
+			return errResult, nil
 		}
-		
+
 		// Forward the call to the remote server using the original tool name
 		result, err := mcpClient.CallTool(ctx, remoteTool.OriginalName, args)
 		if err != nil {
 			// Wrap error with server context
 			errorMsg := fmt.Sprintf("[%s] %v", remoteTool.ServerName, err)
-			return mcp.NewToolResultError(errorMsg), nil
+			errResult := mcp.NewToolResultError(errorMsg)
+			if recorder != nil {
+				recorder("response", "tool_call", remoteTool.PrefixedName, remoteTool.ServerName, errResult)
+			}
+			return errResult, nil
 		}
 		
 		// Transform the result back to MCP format
 		mcpResult := transformResult(result)
+
+		// Record the response if recorder is provided
+		if recorder != nil {
+			recorder("response", "tool_call", remoteTool.PrefixedName, remoteTool.ServerName, mcpResult)
+		}
+
 		return mcpResult, nil
 	}
 }
@@ -117,19 +139,19 @@ func (r *ToolRegistry) GetAllTools() []discovery.RemoteTool {
 }
 
 // CreateHandlerForTool creates a proxy handler for a specific tool
-func (r *ToolRegistry) CreateHandlerForTool(prefixedToolName string) (server.ToolHandlerFunc, error) {
+func (r *ToolRegistry) CreateHandlerForTool(prefixedToolName string, recorder RecorderFunc) (server.ToolHandlerFunc, error) {
 	// Get tool metadata
 	tool, exists := r.GetTool(prefixedToolName)
 	if !exists {
 		return nil, fmt.Errorf("tool not found: %s", prefixedToolName)
 	}
-	
+
 	// Get associated client
 	mcpClient, exists := r.GetClient(tool.ServerName)
 	if !exists {
 		return nil, fmt.Errorf("client not found for server: %s", tool.ServerName)
 	}
-	
-	// Create and return the handler
-	return CreateProxyHandler(mcpClient, tool), nil
+
+	// Create and return the handler with optional recorder
+	return CreateProxyHandler(mcpClient, tool, recorder), nil
 }
