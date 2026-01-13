@@ -106,8 +106,8 @@ func (w *DynamicWrapper) EnableRecording(filename string) error {
 		Messages:   []RecordedMessage{},
 	}
 	
-	headerBytes, _ := json.MarshalIndent(session, "", "  ")
-	fmt.Fprintf(file, "# MCP Recording Session\n# Started: %s\n%s\n", 
+	headerBytes, _ := json.Marshal(session)
+	fmt.Fprintf(file, "# MCP Recording Session\n# Started: %s\n%s\n",
 		session.StartTime.Format(time.RFC3339), string(headerBytes))
 	
 	log.Printf("Recording enabled to: %s", filename)
