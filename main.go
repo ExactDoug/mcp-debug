@@ -186,19 +186,19 @@ func helloHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallTo
 // runDynamicProxyWithManagement runs the proxy with dynamic management tools
 func runDynamicProxyWithManagement(configPath, recordFile string) error {
 	ctx := context.Background()
-	
+
 	// Load configuration
 	log.Printf("Loading configuration from: %s", configPath)
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
-	
+
 	log.Printf("Configuration loaded: %d servers configured", len(cfg.Servers))
-	
-	// Create dynamic wrapper
+
+	// Create dynamic wrapper (uses mark3labs/mcp-go which works with stdio)
 	wrapper := integration.NewDynamicWrapper(cfg)
-	
+
 	// Enable recording if specified
 	if recordFile != "" {
 		log.Printf("Recording JSON-RPC traffic to: %s", recordFile)
@@ -206,7 +206,7 @@ func runDynamicProxyWithManagement(configPath, recordFile string) error {
 			return fmt.Errorf("failed to enable recording: %w", err)
 		}
 	}
-	
+
 	// Initialize with static servers
 	log.Println("Initializing proxy server...")
 	if err := wrapper.Initialize(ctx); err != nil {
@@ -216,7 +216,7 @@ func runDynamicProxyWithManagement(configPath, recordFile string) error {
 		}
 		log.Println("Starting with no initial servers - use server_add to add servers dynamically")
 	}
-	
+
 	// Start the server
 	return wrapper.Start()
 }
