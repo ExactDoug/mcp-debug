@@ -4,7 +4,7 @@
 
 **Status**: Feature implemented in commit 49f5581
 **Branch**: feature/env-selective-inheritance
-**Last Updated**: 2026-01-12
+**Last Updated**: 2026-01-13
 
 ---
 
@@ -52,7 +52,7 @@ servers:
     command: python3
     args: ["-m", "untrusted_mcp_server"]
     inherit:
-      mode: tier1  # Only baseline variables
+      mode: tier1  # Only baseline variables (default)
       extra: ["PYTHONPATH"]  # Explicitly add what's needed
       deny: ["SSH_AUTH_SOCK"]  # Explicitly block sensitive vars
 ```
@@ -60,10 +60,12 @@ servers:
 ### Security Benefits
 
 1. **Default-secure**: By default, only Tier 1 baseline variables are inherited
-2. **Explicit opt-in**: Sensitive variables must be explicitly added via `extra` or `prefix`
-3. **Auditable**: Configuration files show exactly what each server receives
-4. **Defense in depth**: Multiple layers (tiers, deny lists, implicit blocks)
-5. **httpoxy mitigation**: HTTP_PROXY (uppercase) blocked by default to prevent httpoxy attacks
+2. **Tier 1 baseline always available**: Prevents broken environments (PATH, HOME always available unless explicitly denied)
+3. **Explicit opt-in for additional vars**: Variables beyond Tier 1 must be explicitly requested via `extra` or `prefix`
+4. **Auditable**: Configuration files show exactly what each server receives
+5. **Defense in depth**: Multiple layers (tiers, deny lists, implicit blocks)
+6. **httpoxy mitigation**: HTTP_PROXY (uppercase) blocked by default to prevent httpoxy attacks
+7. **No mode to inherit everything**: Even `mode: all` only inherits Tier 1 + Tier 2, not all parent variables
 
 ---
 
@@ -71,9 +73,9 @@ servers:
 
 The inheritance system is organized into two tiers plus an implicit denylist.
 
-### Tier 1: Baseline Variables
+### Tier 1: Baseline Variables (Always Inherited)
 
-These are minimal essential variables that most programs need to function correctly. Always inherited unless explicitly denied.
+These are minimal essential variables that most programs need to function correctly. **Always inherited unless explicitly denied.**
 
 | Variable | Purpose |
 |----------|---------|
@@ -88,7 +90,9 @@ These are minimal essential variables that most programs need to function correc
 | `TEMP` | Temporary directory (Windows) |
 | `TMP` | Temporary directory (Windows) |
 
-**Rationale**: These variables are required for basic process functionality and rarely contain secrets. Excluding them would break most servers.
+**Rationale**: These variables are required for basic process functionality and rarely contain secrets. Excluding them would break most servers. By making Tier 1 the guaranteed baseline, we prevent accidentally creating broken environments while still maintaining security.
+
+**Blocking Tier 1 variables**: If you need to block a Tier 1 variable (e.g., for maximum isolation testing), use the `deny:` list.
 
 ### Tier 2: Network and TLS Variables
 
@@ -134,32 +138,9 @@ inherit:
 
 ## Inheritance Modes
 
-The `mode` setting controls the base set of variables to inherit.
+The `mode` setting controls the base set of variables to inherit. **All modes inherit at least Tier 1 baseline variables** (unless explicitly denied).
 
-### `mode: none`
-
-**No automatic inheritance.** Only variables explicitly listed in `env:` are passed to the server.
-
-```yaml
-servers:
-  - name: isolated-server
-    command: python3
-    args: ["-m", "my_server"]
-    inherit:
-      mode: none
-    env:
-      # Only these exact variables will be set
-      PYTHONPATH: "/opt/myapp"
-      MY_CONFIG: "production"
-```
-
-**Use cases**:
-- Maximum security/isolation
-- Testing in controlled environments
-- Containerized servers
-- When you want complete control over the environment
-
-### `mode: tier1` (DEFAULT)
+### `mode: none` or `mode: tier1` (DEFAULT)
 
 **Inherit Tier 1 baseline variables only**, plus any variables from `extra` and `prefix`.
 
@@ -179,6 +160,8 @@ servers:
 - Default for most servers
 - Good balance of functionality and security
 - Prevents most secret leakage
+
+**Note**: `mode: none` and `mode: tier1` behave identically - both inherit Tier 1 baseline. The "none" naming is kept for backward compatibility but is somewhat misleading. To achieve true isolation (no automatic inheritance), use `mode: tier1` with an explicit `deny:` list containing all Tier 1 variables.
 
 ### `mode: tier1+tier2`
 
@@ -203,7 +186,7 @@ servers:
 
 ### `mode: all`
 
-**Inherit ALL environment variables from parent process**, except those in deny lists.
+**Same as `mode: tier1+tier2`**. Inherits Tier 1 + Tier 2 variables, plus any from `extra` and `prefix`.
 
 ```yaml
 servers:
@@ -211,17 +194,17 @@ servers:
     command: ./my-trusted-app
     inherit:
       mode: all
-      deny: ["AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN"]
+      extra: ["MY_APP_CONFIG", "DATABASE_URL"]
 ```
 
-**Inherited**: Everything in parent environment (minus denied variables)
+**Inherited**: Tier 1 + Tier 2 variables, plus anything in `extra` or matching `prefix` patterns
 
 **Use cases**:
-- Trusted in-house servers
-- Legacy servers requiring many variables
-- Development environments where you want maximum compatibility
+- Servers needing network/TLS capabilities
+- When you want a recognizable name that implies "maximum compatibility"
+- Backward compatibility with configurations expecting "all" to mean "Tier 1 + Tier 2"
 
-**⚠️ Security Warning**: Use this mode only with fully trusted servers. Experimental or third-party servers should use `tier1` or `tier1+tier2`.
+**⚠️ Important**: Despite the name, `mode: all` does **NOT** inherit all parent environment variables. It's equivalent to `tier1+tier2`. This is a security-first design decision to prevent accidental secret leakage. To inherit additional variables, you must explicitly list them in `extra:` or `prefix:`.
 
 ---
 
@@ -272,6 +255,7 @@ Controls base inheritance behavior.
 - **Values**: `none`, `tier1`, `tier1+tier2`, `all`
 - **Default**: `tier1` (if not specified)
 - **Example**: `mode: "tier1+tier2"`
+- **Note**: `none` and `tier1` are equivalent; `all` is equivalent to `tier1+tier2`
 
 #### `extra` (array of strings)
 
@@ -297,18 +281,18 @@ Useful for inheriting groups of related variables (e.g., all configuration for a
 
 #### `deny` (array of strings)
 
-Variables to explicitly block from inheritance.
+Variables to explicitly block from inheritance, including Tier 1 baseline variables.
 
 - **Type**: Array of strings
 - **Default**: Empty array
 - **Combines with implicit denylist**: Both are applied
-- **Example**: `deny: ["SSH_AUTH_SOCK", "AWS_SECRET_ACCESS_KEY"]`
+- **Example**: `deny: ["SSH_AUTH_SOCK", "AWS_SECRET_ACCESS_KEY", "PATH"]`
 
-Use this to block sensitive variables even in `mode: all`.
+Use this to block sensitive variables or to achieve maximum isolation by denying Tier 1 variables.
 
 #### `allow_denied_if_explicit` (boolean)
 
-Allow variables from the implicit denylist if they're in `extra`.
+Allow variables from the implicit denylist (and explicit `deny` list) if they're in `extra`.
 
 - **Type**: Boolean
 - **Default**: `false`
@@ -323,7 +307,7 @@ When `true`: Variables in `extra` bypass both implicit and explicit deny lists.
 
 ## Configuration Examples
 
-### Example 1: Basic Python Server
+### Example 1: Basic Python Server (Default - Most Secure)
 
 **Scenario**: Python MCP server needs Python-specific variables.
 
@@ -334,7 +318,7 @@ servers:
     command: python3
     args: ["-m", "my_python_server"]
     inherit:
-      mode: tier1
+      mode: tier1  # Optional - this is the default
       extra: ["PYTHONPATH", "VIRTUAL_ENV", "PYTHONHOME"]
 ```
 
@@ -384,7 +368,7 @@ servers:
 - All variables starting with `RMM_`
 - PYTHONPATH
 
-### Example 4: Maximum Security
+### Example 4: Maximum Security (Untrusted Server)
 
 **Scenario**: Untrusted experimental server, minimal exposure.
 
@@ -395,13 +379,37 @@ servers:
     command: python3
     args: ["-m", "untrusted_server"]
     inherit:
-      mode: tier1
-      deny: ["SSH_AUTH_SOCK"]  # Block SSH even though not in tier1
+      mode: tier1  # Only baseline variables
+      deny: ["SSH_AUTH_SOCK"]  # Extra paranoia (though not in Tier 1 anyway)
 ```
 
-**Inherited**: Only Tier 1 baseline variables
+**Inherited**: Only Tier 1 baseline variables (PATH, HOME, USER, SHELL, LANG, LC_ALL, TZ, TMPDIR, TEMP, TMP)
 
-### Example 5: Proxy with Corporate Proxy Variables
+### Example 5: Maximum Isolation (Testing)
+
+**Scenario**: Complete isolation for testing, no automatic inheritance.
+
+```yaml
+servers:
+  - name: isolated-test
+    transport: stdio
+    command: python3
+    args: ["-m", "test_server"]
+    inherit:
+      mode: tier1
+      deny: ["PATH", "HOME", "USER", "SHELL", "LANG", "LC_ALL", "TZ", "TMPDIR", "TEMP", "TMP"]
+    env:
+      # Only these exact variables will be set
+      PYTHONPATH: "/opt/myapp"
+      MY_CONFIG: "test"
+```
+
+**Inherited**: None (all Tier 1 variables explicitly denied)
+**Set**: Only PYTHONPATH and MY_CONFIG from `env:` block
+
+**Note**: This will likely break most servers. Only use for controlled testing.
+
+### Example 6: Proxy with Corporate Proxy Variables
 
 **Scenario**: Enterprise environment requiring lowercase proxy variables.
 
@@ -423,27 +431,30 @@ servers:
 
 **⚠️ Security Note**: Only use this configuration if you control the server code and understand the httpoxy risk.
 
-### Example 6: Trusted Server with Deny List
+### Example 7: "All" Mode (Tier 1 + Tier 2 + Extras)
 
-**Scenario**: In-house trusted server, inherit everything except specific secrets.
+**Scenario**: Server needing network capabilities plus custom variables.
 
 ```yaml
 servers:
-  - name: trusted-internal
+  - name: feature-rich-server
     transport: stdio
-    command: ./internal-server
+    command: ./my-server
     inherit:
-      mode: all
-      deny:
-        - AWS_SECRET_ACCESS_KEY
-        - AWS_SESSION_TOKEN
-        - GITHUB_TOKEN
-        - ANTHROPIC_API_KEY
+      mode: all  # Same as tier1+tier2
+      extra: ["DATABASE_URL", "REDIS_URL", "API_TOKEN"]
+      deny: ["AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN"]
 ```
 
-**Inherited**: Everything except the four denied variables
+**Inherited**:
+- Tier 1 + Tier 2 variables
+- DATABASE_URL, REDIS_URL, API_TOKEN
 
-### Example 7: Proxy-Level Defaults
+**Blocked**:
+- AWS_SECRET_ACCESS_KEY, GITHUB_TOKEN (explicitly denied)
+- All other parent environment variables not in Tier 1, Tier 2, or `extra` list
+
+### Example 8: Proxy-Level Defaults
 
 **Scenario**: Set defaults for all servers, override for specific ones.
 
@@ -491,23 +502,11 @@ servers:
 
 **Behavior**: Defaults to `mode: tier1` with no extras, prefixes, or deny rules.
 
-**Inherited**: PATH, HOME, USER, SHELL, LANG, LC_ALL, TZ, TMPDIR, TEMP, TMP
-
-### Completely Empty Configuration
-
-```yaml
-servers:
-  - name: my-server
-    transport: stdio
-    command: python3
-    args: ["-m", "server"]
-```
-
-**Behavior**: Same as above - defaults to `mode: tier1`.
+**Inherited**: PATH, HOME, USER, SHELL, LANG, LC_ALL, TZ, TMPDIR, TEMP, TMP (Tier 1 baseline)
 
 ### Explicit Overrides Always Win
 
-Even with `mode: none`, explicit overrides in the `env:` block are always applied:
+Even with `mode: tier1` and `deny` lists, explicit overrides in the `env:` block are always applied:
 
 ```yaml
 servers:
@@ -516,13 +515,15 @@ servers:
     command: python3
     args: ["-m", "server"]
     inherit:
-      mode: none  # No inheritance
+      mode: tier1
+      deny: ["PATH"]  # Deny PATH from inheritance
     env:
+      PATH: "/custom/path"  # Always set (explicit override)
       CUSTOM_VAR: "value"  # Always set
       API_KEY: "${PARENT_API_KEY}"  # Expanded from parent
 ```
 
-**Result**: Only `CUSTOM_VAR` and `API_KEY` are set in the server environment.
+**Result**: PATH is set to "/custom/path" (not inherited from parent), CUSTOM_VAR is set, API_KEY is expanded from parent environment.
 
 ---
 
@@ -530,21 +531,24 @@ servers:
 
 Understanding precedence is crucial for debugging configuration issues.
 
-### Inheritance Resolution (Lowest to Highest Priority)
+### Inheritance Resolution (Processing Order)
 
 1. **Implicit denylist** - HTTP_PROXY, HTTPS_PROXY, etc. blocked by default
-2. **Tier 1 variables** - Always inherited unless denied
-3. **Tier 2 variables** - Inherited if mode includes tier2
-4. **Proxy-level `inherit` config** - Default behavior for all servers
-5. **Server-level `inherit` config** - Overrides proxy defaults
-6. **Explicit `env:` overrides** - Always applied, never denied
+2. **Explicit deny lists** - Variables in `deny:` arrays (proxy and server level)
+3. **Tier 1 variables** - Always inherited unless denied
+4. **Tier 2 variables** - Inherited if mode includes tier2
+5. **Extra variables** - From `extra:` lists (proxy and server level)
+6. **Prefix-matched variables** - Variables matching `prefix:` patterns
+7. **Explicit `env:` overrides** - Always applied, never denied
 
 ### Deny Resolution
 
-A variable is denied if:
+A variable is blocked if:
 - It's in the **implicit denylist** AND not in `extra` with `allow_denied_if_explicit: true`
 - It's in the **proxy-level deny list** AND not in `extra` with `allow_denied_if_explicit: true`
 - It's in the **server-level deny list** AND not in `extra` with `allow_denied_if_explicit: true`
+
+Variables in the `env:` block are NEVER blocked, regardless of deny lists.
 
 ### Example Resolution
 
@@ -563,16 +567,17 @@ servers:
       # deny: []  (not specified, so proxy deny list applies)
     env:
       EXPLICIT_VAR: "value"
+      BLOCKED_VAR: "allowed-via-override"
 ```
 
 **Resolution**:
-1. Start with Tier 1 (from server mode)
-2. Add Tier 2 (from server mode: tier1+tier2)
-3. Add PROXY_VAR (from proxy extra)
-4. Add SERVER_VAR (from server extra)
-5. Block BLOCKED_VAR (from proxy deny)
-6. Block HTTP_PROXY, HTTPS_PROXY, etc. (implicit denylist)
-7. Force set EXPLICIT_VAR (explicit override)
+1. Implicit denylist: HTTP_PROXY, HTTPS_PROXY, etc. blocked
+2. Proxy deny: BLOCKED_VAR blocked (from inheritance)
+3. Tier 1: PATH, HOME, USER, SHELL, etc. inherited
+4. Tier 2: SSL_CERT_FILE, etc. inherited (server mode is tier1+tier2)
+5. Proxy extra: PROXY_VAR inherited
+6. Server extra: SERVER_VAR inherited
+7. Explicit env: EXPLICIT_VAR set, BLOCKED_VAR set (overrides deny)
 
 ---
 
@@ -623,18 +628,14 @@ no_proxy
 
 **Symptom**: Server fails with "command not found" errors.
 
-**Cause**: `PATH` not inherited (possible with `mode: none`).
+**Cause**: `PATH` denied (only possible with explicit `deny: ["PATH"]`).
 
-**Solution**: Ensure `PATH` is inherited or explicitly set:
+**Solution**: Don't deny PATH, or set it explicitly:
 
 ```yaml
 inherit:
-  mode: tier1  # Includes PATH
-# OR
-inherit:
-  mode: none
-  extra: ["PATH"]
-# OR
+  mode: tier1  # PATH included by default
+# OR if you denied it:
 env:
   PATH: "/usr/local/bin:/usr/bin:/bin"
 ```
@@ -688,6 +689,39 @@ inherit:
   prefix: ["MY_APP_"]  # Inherits MY_APP_KEY, MY_APP_URL, etc.
 ```
 
+### "Mode All" Doesn't Inherit Everything
+
+**Symptom**: Variables are missing despite using `mode: all`.
+
+**Cause**: `mode: all` is equivalent to `tier1+tier2`, not "inherit everything".
+
+**Solution**: This is intentional for security. Explicitly add needed variables:
+
+```yaml
+inherit:
+  mode: all  # tier1+tier2
+  extra: ["MY_VAR", "ANOTHER_VAR", "SECRET_KEY"]
+```
+
+### Need True Isolation (No Tier 1)
+
+**Symptom**: Want to block all automatic inheritance, including Tier 1.
+
+**Cause**: Tier 1 is always inherited unless explicitly denied.
+
+**Solution**: Explicitly deny all Tier 1 variables:
+
+```yaml
+inherit:
+  mode: tier1
+  deny: ["PATH", "HOME", "USER", "SHELL", "LANG", "LC_ALL", "TZ", "TMPDIR", "TEMP", "TMP"]
+env:
+  # Only set what you need
+  CUSTOM_VAR: "value"
+```
+
+**Warning**: This will likely break most servers. Only use for controlled testing.
+
 ### Case Sensitivity Issues (Windows)
 
 **Symptom**: Environment variables not being inherited on Windows.
@@ -731,10 +765,10 @@ mcp-debug validates inheritance configuration at startup.
 
 ```yaml
 inherit:
-  mode: "none"         # ✓ Valid
+  mode: "none"         # ✓ Valid (same as tier1)
   mode: "tier1"        # ✓ Valid
   mode: "tier1+tier2"  # ✓ Valid
-  mode: "all"          # ✓ Valid
+  mode: "all"          # ✓ Valid (same as tier1+tier2)
   mode: ""             # ✓ Valid (defaults to tier1)
 ```
 
@@ -744,7 +778,7 @@ inherit:
 inherit:
   mode: "tier2"        # ✗ Invalid (no tier2-only mode)
   mode: "tier1,tier2"  # ✗ Invalid (use "tier1+tier2")
-  mode: "some"         # ✗ Invalid (not a defined mode)
+  mode: "everything"   # ✗ Invalid (not a defined mode)
 ```
 
 ### Validation Errors
@@ -817,23 +851,27 @@ servers:
     command: python3
     args: ["-m", "mcp_server"]
     inherit:
-      mode: none
+      mode: tier1
+      deny: ["HOME", "USER"]  # Block even Tier 1 vars for extra isolation
     env:
       CUSTOMER_ID: "customer-a"
       DB_URL: "postgresql://db-a/data"
+      HOME: "/var/lib/customer-a"  # Custom HOME
 
   - name: customer-b
     transport: stdio
     command: python3
     args: ["-m", "mcp_server"]
     inherit:
-      mode: none
+      mode: tier1
+      deny: ["HOME", "USER"]
     env:
       CUSTOMER_ID: "customer-b"
       DB_URL: "postgresql://db-b/data"
+      HOME: "/var/lib/customer-b"  # Custom HOME
 ```
 
-Each server has a completely isolated environment.
+Each server has isolated environment with custom values.
 
 ### Development vs Production
 
@@ -843,8 +881,8 @@ Each server has a completely isolated environment.
 # development-config.yaml
 proxy:
   inherit:
-    mode: all  # Relaxed for development
-    deny: []
+    mode: tier1+tier2  # More permissive for development
+    extra: ["DEBUG", "DEV_TOKEN"]
 
 servers:
   - name: dev-server
@@ -857,7 +895,7 @@ servers:
 proxy:
   inherit:
     mode: tier1  # Strict for production
-    deny: ["SSH_AUTH_SOCK"]
+    deny: ["SSH_AUTH_SOCK", "AWS_SESSION_TOKEN"]
 
 servers:
   - name: prod-server
@@ -901,8 +939,8 @@ uvx mcp-debug --proxy --config config-tier1.yaml
 # Test tier1+tier2 (with network)
 uvx mcp-debug --proxy --config config-tier2.yaml
 
-# Test all (maximum compatibility)
-uvx mcp-debug --proxy --config config-all.yaml
+# Test with extras
+uvx mcp-debug --proxy --config config-extras.yaml
 ```
 
 Compare behavior and choose the most secure option that works.
@@ -915,7 +953,7 @@ Compare behavior and choose the most secure option that works.
 
 If you previously ran mcp-debug without any inheritance configuration:
 
-**Old behavior**: Depended on implementation details (likely all variables inherited)
+**Old behavior**: Depended on implementation details (may have varied)
 
 **New behavior**: Defaults to `mode: tier1` (secure by default)
 
@@ -923,31 +961,35 @@ If you previously ran mcp-debug without any inheritance configuration:
 1. Test with default `tier1` mode
 2. If servers break, identify missing variables via logs
 3. Add missing variables to `extra` list
-4. OR switch to `mode: all` temporarily, then gradually restrict
+4. OR switch to `mode: tier1+tier2` if TLS variables are needed
 
-### From `mode: all`
+### From Expecting "All Variables"
 
-If you started with `mode: all` and want to tighten security:
+If you expected all parent environment variables to be inherited:
 
-**Step 1**: Enable debug logging to see what variables servers actually use:
+**Old expectation**: All variables from parent process
+
+**New behavior**: Only Tier 1 (or Tier 1 + Tier 2 with `mode: all`)
+
+**Migration path**:
+
+**Step 1**: Identify which variables your server actually needs:
 
 ```yaml
 inherit:
-  mode: all
-  # Add logging to see what's accessed (implementation-dependent)
+  mode: tier1  # Start minimal
+  # Server will fail with clear errors about missing vars
 ```
 
-**Step 2**: Switch to `tier1+tier2` and add known requirements:
+**Step 2**: Add needed variables explicitly:
 
 ```yaml
 inherit:
-  mode: tier1+tier2
-  extra: ["VARIABLE1", "VARIABLE2"]
+  mode: tier1+tier2  # If TLS needed
+  extra: ["DATABASE_URL", "API_KEY", "CUSTOM_CONFIG"]
 ```
 
 **Step 3**: Test thoroughly and add missing variables as needed.
-
-**Step 4**: Once stable, consider switching to `tier1` if tier2 isn't needed.
 
 ### Adding to Existing Servers
 
@@ -962,7 +1004,7 @@ servers:
     args: ["-m", "server"]
 ```
 
-**After**:
+**After (explicit tier1)**:
 ```yaml
 servers:
   - name: my-server
@@ -970,7 +1012,7 @@ servers:
     command: python3
     args: ["-m", "server"]
     inherit:
-      mode: tier1
+      mode: tier1  # Make it explicit
       extra: ["PYTHONPATH"]
 ```
 
@@ -1017,8 +1059,8 @@ Create a test script:
 ```bash
 #!/bin/bash
 
-export TIER1_VAR="HOME"  # Should inherit
-export TIER2_VAR="SSL_CERT_FILE"  # Only with tier2
+export HOME="/home/testuser"  # Tier 1 - should inherit
+export SSL_CERT_FILE="/etc/ssl/cert.pem"  # Tier 2 - only with tier2 mode
 export CUSTOM_VAR="test"  # Only with extra
 export SECRET_VAR="secret"  # Should NOT inherit
 
@@ -1065,20 +1107,32 @@ Run through normal workflows and verify:
 
 ### Q: What happens if I don't specify an `inherit` block?
 
-**A**: Defaults to `mode: tier1` (secure by default). Only baseline variables are inherited.
+**A**: Defaults to `mode: tier1` (secure by default). Only Tier 1 baseline variables are inherited.
 
-### Q: Can I use `mode: tier2` without `tier1`?
+### Q: What's the difference between `mode: none` and `mode: tier1`?
 
-**A**: No. The only modes are `none`, `tier1`, `tier1+tier2`, and `all`. Tier 2 always includes Tier 1.
+**A**: They're identical in the current implementation. Both inherit Tier 1 baseline variables. The "none" naming is kept for backward compatibility.
 
-### Q: How do I inherit ALL variables like the old behavior?
+### Q: How do I achieve true isolation (no automatic inheritance)?
 
-**A**: Use `mode: all`:
+**A**: Use `mode: tier1` with an explicit `deny:` list containing all Tier 1 variables:
 
 ```yaml
 inherit:
-  mode: all
+  mode: tier1
+  deny: ["PATH", "HOME", "USER", "SHELL", "LANG", "LC_ALL", "TZ", "TMPDIR", "TEMP", "TMP"]
+env:
+  # Only set what you need
+  CUSTOM_VAR: "value"
 ```
+
+### Q: Why doesn't `mode: all` inherit ALL variables?
+
+**A**: Security-first design. `mode: all` is equivalent to `tier1+tier2`. Inheriting all parent variables would risk leaking credentials and secrets. To inherit additional variables, use the `extra:` list.
+
+### Q: Can I use `mode: tier2` without `tier1`?
+
+**A**: No. The only modes are `none` (=tier1), `tier1`, `tier1+tier2`, and `all` (=tier1+tier2). Tier 2 always includes Tier 1.
 
 ### Q: Why are proxy variables blocked by default?
 
@@ -1116,7 +1170,7 @@ inherit:
   prefix: ["MY_APP_", "CONFIG_"]
 ```
 
-This inherits: CUSTOM1, CUSTOM2, plus any variables starting with MY_APP_ or CONFIG_.
+This inherits: Tier 1 + CUSTOM1 + CUSTOM2 + any variables starting with MY_APP_ or CONFIG_.
 
 ### Q: Are environment variable names case-sensitive?
 
@@ -1175,6 +1229,10 @@ env:
 
 **A**: The inheritance system only applies to `stdio` transport (local child processes). SSE and HTTP transports don't have environment inheritance because they're remote connections.
 
+### Q: Why is Tier 1 always inherited?
+
+**A**: Security AND functionality. Tier 1 variables (PATH, HOME, etc.) are required for basic process operation and rarely contain secrets. Making them the guaranteed baseline prevents accidentally creating broken environments while maintaining security. You can still block them with `deny:` if needed for testing.
+
 ---
 
 ## See Also
@@ -1200,6 +1258,6 @@ This is DRAFT documentation for a newly implemented feature. As we gather real-w
 - GitHub Issues: [mcp-debug issues](https://github.com/standardbeagle/mcp-debug/issues)
 - Discussion: Include "[env-inheritance]" in the title
 
-**Last Updated**: 2026-01-12
+**Last Updated**: 2026-01-13
 **Implementation Commit**: 49f5581
 **Branch**: feature/env-selective-inheritance
