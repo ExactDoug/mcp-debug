@@ -546,8 +546,20 @@ func (w *DynamicWrapper) handleServerDisconnect(ctx context.Context, request mcp
 		if err := serverInfo.Client.Close(); err != nil {
 			log.Printf("Error closing client %s: %v", name, err)
 		}
+
+		// Remove from proxy server's client list to prevent stale references
+		w.proxyServer.mu.Lock()
+		newClients := make([]client.MCPClient, 0, len(w.proxyServer.clients)-1)
+		for _, c := range w.proxyServer.clients {
+			if c.ServerName() != name {
+				newClients = append(newClients, c)
+			}
+		}
+		w.proxyServer.clients = newClients
+		w.proxyServer.mu.Unlock()
+		log.Printf("Removed client '%s' from proxy server's client list", name)
 	}
-	
+
 	// Mark as disconnected but keep tools registered
 	serverInfo.IsConnected = false
 	serverInfo.ErrorMessage = "Server disconnected by user"
@@ -682,24 +694,34 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 		return toolResult, nil
 	}
 	
-	// Update server info
+	// Update server info (but NOT IsConnected yet - defer until all state updated)
 	serverInfo.Client = stdioClient
 	serverInfo.Config = serverConfig
-	serverInfo.IsConnected = true
 	serverInfo.ErrorMessage = ""
-	
-	// Update proxy server's client list
+
+	// Update proxy server's client list with proper mutex protection
+	w.proxyServer.mu.Lock()
+	clientFound := false
 	for i, c := range w.proxyServer.clients {
 		if c.ServerName() == name {
 			w.proxyServer.clients[i] = stdioClient
+			clientFound = true
 			break
 		}
 	}
-	
+	if !clientFound {
+		// Client not in list (was removed by disconnect), append it
+		w.proxyServer.clients = append(w.proxyServer.clients, stdioClient)
+		log.Printf("Added client '%s' to proxy server's client list", name)
+	} else {
+		log.Printf("Updated client '%s' in proxy server's client list", name)
+	}
+	w.proxyServer.mu.Unlock()
+
 	// Update registry with new client (tools keep same names)
 	for _, tool := range tools {
 		prefixedName := fmt.Sprintf("%s_%s", name, tool.Name)
-		
+
 		// Check if this tool name exists in our registered tools
 		found := false
 		for _, registeredTool := range serverInfo.Tools {
@@ -708,7 +730,7 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 				break
 			}
 		}
-		
+
 		if found {
 			// Update registry with new client
 			discoveredTool := discovery.RemoteTool{
@@ -722,6 +744,10 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 			log.Printf("Updated tool registration: %s", prefixedName)
 		}
 	}
+
+	// NOW mark as connected (atomic state transition after all updates complete)
+	serverInfo.IsConnected = true
+	log.Printf("Server '%s' marked as connected", name)
 
 	// Build result message based on how we reconnected
 	var resultMsg string
