@@ -6,13 +6,14 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	
+
 	"mcp-debug/client"
 	"mcp-debug/config"
 	"mcp-debug/discovery"
@@ -26,9 +27,10 @@ type DynamicWrapper struct {
 	mu            sync.RWMutex
 	
 	// Recording functionality
-	recordFile    *os.File
-	recordEnabled bool
-	recordMu      sync.Mutex
+	recordFile     *os.File
+	recordEnabled  bool
+	recordMu       sync.Mutex
+	recordFilename string // Path to the recording file (for metadata)
 }
 
 type DynamicServerInfo struct {
@@ -96,23 +98,25 @@ func (w *DynamicWrapper) EnableRecording(filename string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create recording file: %w", err)
 	}
-	
+
 	w.recordFile = file
+	w.recordFilename = filename
 	w.recordEnabled = true
-	
+
 	// Write session header
 	session := RecordingSession{
 		StartTime:  time.Now(),
 		ServerInfo: "Dynamic MCP Proxy v1.0.0",
 		Messages:   []RecordedMessage{},
 	}
-	
+
 	headerBytes, _ := json.Marshal(session)
 	fmt.Fprintf(file, "# MCP Recording Session\n# Started: %s\n%s\n",
 		session.StartTime.Format(time.RFC3339), string(headerBytes))
 
-	// Inject recorder into proxy server for static server recording
+	// Inject recorder and metadata function into proxy server for static server recording
 	w.proxyServer.recorderFunc = w.recordMessage
+	w.proxyServer.metadataFunc = w.addRecordingMetadata
 
 	log.Printf("Recording enabled to: %s", filename)
 	return nil
@@ -150,6 +154,42 @@ func (w *DynamicWrapper) recordMessage(direction, messageType, toolName, serverN
 	
 	fmt.Fprintf(w.recordFile, "%s\n", string(recordedBytes))
 	w.recordFile.Sync() // Ensure immediate write
+}
+
+// addRecordingMetadata adds recording file information to tool results when recording is active
+func (w *DynamicWrapper) addRecordingMetadata(result *mcp.CallToolResult) *mcp.CallToolResult {
+	if !w.recordEnabled {
+		return result
+	}
+
+	w.recordMu.Lock()
+	filename := w.recordFilename
+	w.recordMu.Unlock()
+
+	if filename == "" {
+		return result
+	}
+
+	// Compute absolute path
+	absPath, err := filepath.Abs(filename)
+	if err != nil {
+		absPath = filename // fallback to original if abs fails
+	}
+
+	// Build metadata text
+	metadataText := fmt.Sprintf(
+		"📹 Recording: %s\n   Full path: %s\n   Purpose: JSON-RPC message log for debugging and playback testing",
+		filename,
+		absPath,
+	)
+
+	// Create metadata content item
+	metadataItem := mcp.NewTextContent(metadataText)
+
+	// Append to existing content
+	result.Content = append(result.Content, metadataItem)
+
+	return result
 }
 
 func (w *DynamicWrapper) registerManagementTools() {
@@ -219,13 +259,15 @@ func (w *DynamicWrapper) handleServerAdd(ctx context.Context, request mcp.CallTo
 	name, err := request.RequireString("name")
 	if err != nil {
 		result := mcp.NewToolResultError("name is required")
+		result = w.addRecordingMetadata(result)
 		w.recordMessage("response", "tool_call", "server_add", "proxy", result)
 		return result, nil
 	}
-	
+
 	command, err := request.RequireString("command")
 	if err != nil {
 		result := mcp.NewToolResultError("command is required")
+		result = w.addRecordingMetadata(result)
 		w.recordMessage("response", "tool_call", "server_add", "proxy", result)
 		return result, nil
 	}
@@ -235,13 +277,19 @@ func (w *DynamicWrapper) handleServerAdd(ctx context.Context, request mcp.CallTo
 	
 	// Check if already exists
 	if _, exists := w.dynamicServers[name]; exists {
-		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' already exists", name)), nil
+		result := mcp.NewToolResultError(fmt.Sprintf("Server '%s' already exists", name))
+		result = w.addRecordingMetadata(result)
+		w.recordMessage("response", "tool_call", "server_add", "proxy", result)
+		return result, nil
 	}
-	
+
 	// Parse command
 	parts := strings.Fields(command)
 	if len(parts) == 0 {
-		return mcp.NewToolResultError("Invalid command"), nil
+		result := mcp.NewToolResultError("Invalid command")
+		result = w.addRecordingMetadata(result)
+		w.recordMessage("response", "tool_call", "server_add", "proxy", result)
+		return result, nil
 	}
 	
 	// Create server config
@@ -262,19 +310,28 @@ func (w *DynamicWrapper) handleServerAdd(ctx context.Context, request mcp.CallTo
 	stdioClient.SetInheritConfig(inheritCfg)
 
 	if err := stdioClient.Connect(ctx); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to connect: %v", err)), nil
+		result := mcp.NewToolResultError(fmt.Sprintf("Failed to connect: %v", err))
+		result = w.addRecordingMetadata(result)
+		w.recordMessage("response", "tool_call", "server_add", "proxy", result)
+		return result, nil
 	}
-	
+
 	if _, err := stdioClient.Initialize(ctx); err != nil {
 		stdioClient.Close()
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to initialize: %v", err)), nil
+		result := mcp.NewToolResultError(fmt.Sprintf("Failed to initialize: %v", err))
+		result = w.addRecordingMetadata(result)
+		w.recordMessage("response", "tool_call", "server_add", "proxy", result)
+		return result, nil
 	}
-	
+
 	// List tools
 	tools, err := stdioClient.ListTools(ctx)
 	if err != nil {
 		stdioClient.Close()
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to list tools: %v", err)), nil
+		result := mcp.NewToolResultError(fmt.Sprintf("Failed to list tools: %v", err))
+		result = w.addRecordingMetadata(result)
+		w.recordMessage("response", "tool_call", "server_add", "proxy", result)
+		return result, nil
 	}
 	
 	// Store server info
@@ -323,24 +380,34 @@ func (w *DynamicWrapper) handleServerAdd(ctx context.Context, request mcp.CallTo
 	
 	result := fmt.Sprintf("Added server '%s' with command: %s %s\nRegistered %d tools successfully.",
 		name, serverConfig.Command, strings.Join(serverConfig.Args, " "), registeredCount)
-	
+
 	toolResult := mcp.NewToolResultText(result)
+	toolResult = w.addRecordingMetadata(toolResult)
 	w.recordMessage("response", "tool_call", "server_add", "proxy", toolResult)
 	return toolResult, nil
 }
 
 func (w *DynamicWrapper) handleServerRemove(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// Record the request
+	w.recordMessage("request", "tool_call", "server_remove", "proxy", request)
+
 	name, err := request.RequireString("name")
 	if err != nil {
-		return mcp.NewToolResultError("name is required"), nil
+		result := mcp.NewToolResultError("name is required")
+		result = w.addRecordingMetadata(result)
+		w.recordMessage("response", "tool_call", "server_remove", "proxy", result)
+		return result, nil
 	}
-	
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	
+
 	serverInfo, exists := w.dynamicServers[name]
 	if !exists {
-		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name)), nil
+		result := mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name))
+		result = w.addRecordingMetadata(result)
+		w.recordMessage("response", "tool_call", "server_remove", "proxy", result)
+		return result, nil
 	}
 	
 	// Note: We can't actually remove tools from mark3labs/mcp-go at runtime
@@ -365,11 +432,17 @@ func (w *DynamicWrapper) handleServerRemove(ctx context.Context, request mcp.Cal
 	
 	result := fmt.Sprintf("Removed server '%s'. Note: %d tools remain registered but are now unavailable.",
 		name, len(serverInfo.Tools))
-	
-	return mcp.NewToolResultText(result), nil
+
+	toolResult := mcp.NewToolResultText(result)
+	toolResult = w.addRecordingMetadata(toolResult)
+	w.recordMessage("response", "tool_call", "server_remove", "proxy", toolResult)
+	return toolResult, nil
 }
 
 func (w *DynamicWrapper) handleServerList(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// Record the request
+	w.recordMessage("request", "tool_call", "server_list", "proxy", request)
+
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	
@@ -419,26 +492,41 @@ func (w *DynamicWrapper) handleServerList(ctx context.Context, request mcp.CallT
 	totalServers := staticCount + len(w.dynamicServers)
 	result.WriteString(fmt.Sprintf("\nTotal servers: %d (static: %d, dynamic: %d)\n",
 		totalServers, staticCount, len(w.dynamicServers)))
-	
-	return mcp.NewToolResultText(result.String()), nil
+
+	toolResult := mcp.NewToolResultText(result.String())
+	toolResult = w.addRecordingMetadata(toolResult)
+	w.recordMessage("response", "tool_call", "server_list", "proxy", toolResult)
+	return toolResult, nil
 }
 
 func (w *DynamicWrapper) handleServerDisconnect(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// Record the request
+	w.recordMessage("request", "tool_call", "server_disconnect", "proxy", request)
+
 	name, err := request.RequireString("name")
 	if err != nil {
-		return mcp.NewToolResultError("name is required"), nil
+		result := mcp.NewToolResultError("name is required")
+		result = w.addRecordingMetadata(result)
+		w.recordMessage("response", "tool_call", "server_disconnect", "proxy", result)
+		return result, nil
 	}
-	
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	
+
 	serverInfo, exists := w.dynamicServers[name]
 	if !exists {
-		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name)), nil
+		result := mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name))
+		result = w.addRecordingMetadata(result)
+		w.recordMessage("response", "tool_call", "server_disconnect", "proxy", result)
+		return result, nil
 	}
 	
 	if !serverInfo.IsConnected {
-		return mcp.NewToolResultText(fmt.Sprintf("Server '%s' is already disconnected", name)), nil
+		toolResult := mcp.NewToolResultText(fmt.Sprintf("Server '%s' is already disconnected", name))
+		toolResult = w.addRecordingMetadata(toolResult)
+		w.recordMessage("response", "tool_call", "server_disconnect", "proxy", toolResult)
+		return toolResult, nil
 	}
 	
 	log.Printf("Disconnecting server '%s'", name)
@@ -457,13 +545,22 @@ func (w *DynamicWrapper) handleServerDisconnect(ctx context.Context, request mcp
 	serverInfo.Client = nil
 	
 	result := fmt.Sprintf("Disconnected server '%s'. Tools remain registered but will return errors.\\nUse server_reconnect to restore with new binary/command.", name)
-	return mcp.NewToolResultText(result), nil
+	toolResult := mcp.NewToolResultText(result)
+	toolResult = w.addRecordingMetadata(toolResult)
+	w.recordMessage("response", "tool_call", "server_disconnect", "proxy", toolResult)
+	return toolResult, nil
 }
 
 func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// Record the request
+	w.recordMessage("request", "tool_call", "server_reconnect", "proxy", request)
+
 	name, err := request.RequireString("name")
 	if err != nil {
-		return mcp.NewToolResultError("name is required"), nil
+		result := mcp.NewToolResultError("name is required")
+		result = w.addRecordingMetadata(result)
+		w.recordMessage("response", "tool_call", "server_reconnect", "proxy", result)
+		return result, nil
 	}
 
 	// Get command (optional now)
@@ -474,11 +571,17 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 
 	serverInfo, exists := w.dynamicServers[name]
 	if !exists {
-		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name)), nil
+		result := mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name))
+		result = w.addRecordingMetadata(result)
+		w.recordMessage("response", "tool_call", "server_reconnect", "proxy", result)
+		return result, nil
 	}
 
 	if serverInfo.IsConnected {
-		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' is still connected. Use server_disconnect first.", name)), nil
+		toolResult := mcp.NewToolResultError(fmt.Sprintf("Server '%s' is still connected. Use server_disconnect first.", name))
+		toolResult = w.addRecordingMetadata(toolResult)
+		w.recordMessage("response", "tool_call", "server_reconnect", "proxy", toolResult)
+		return toolResult, nil
 	}
 
 	var serverConfig config.ServerConfig
@@ -489,7 +592,10 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 
 		parts := strings.Fields(commandStr)
 		if len(parts) == 0 {
-			return mcp.NewToolResultError("Invalid command"), nil
+			result := mcp.NewToolResultError("Invalid command")
+			result = w.addRecordingMetadata(result)
+			w.recordMessage("response", "tool_call", "server_reconnect", "proxy", result)
+			return result, nil
 		}
 
 		// Create new config (preserves name/prefix, but loses env vars)
@@ -506,7 +612,10 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 		log.Printf("Reconnecting server '%s' with STORED configuration", name)
 
 		if serverInfo.Config.Command == "" {
-			return mcp.NewToolResultError("Stored config has no command. Please provide command parameter."), nil
+			toolResult := mcp.NewToolResultError("Stored config has no command. Please provide command parameter.")
+			toolResult = w.addRecordingMetadata(toolResult)
+			w.recordMessage("response", "tool_call", "server_reconnect", "proxy", toolResult)
+			return toolResult, nil
 		}
 
 		// Use stored config as-is (preserves env, inherit, timeout, etc.)
@@ -534,17 +643,23 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 		serverInfo.IsConnected = false
 		serverInfo.ErrorMessage = fmt.Sprintf("Failed to connect: %v", err)
 		serverInfo.Config = serverConfig
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to connect: %v", err)), nil
+		toolResult := mcp.NewToolResultError(fmt.Sprintf("Failed to connect: %v", err))
+		toolResult = w.addRecordingMetadata(toolResult)
+		w.recordMessage("response", "tool_call", "server_reconnect", "proxy", toolResult)
+		return toolResult, nil
 	}
-	
+
 	if _, err := stdioClient.Initialize(ctx); err != nil {
 		stdioClient.Close()
 		serverInfo.IsConnected = false
 		serverInfo.ErrorMessage = fmt.Sprintf("Failed to initialize: %v", err)
 		serverInfo.Config = serverConfig
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to initialize: %v", err)), nil
+		toolResult := mcp.NewToolResultError(fmt.Sprintf("Failed to initialize: %v", err))
+		toolResult = w.addRecordingMetadata(toolResult)
+		w.recordMessage("response", "tool_call", "server_reconnect", "proxy", toolResult)
+		return toolResult, nil
 	}
-	
+
 	// List tools from new server
 	tools, err := stdioClient.ListTools(ctx)
 	if err != nil {
@@ -552,7 +667,10 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 		serverInfo.IsConnected = false
 		serverInfo.ErrorMessage = fmt.Sprintf("Failed to list tools: %v", err)
 		serverInfo.Config = serverConfig
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to list tools: %v", err)), nil
+		toolResult := mcp.NewToolResultError(fmt.Sprintf("Failed to list tools: %v", err))
+		toolResult = w.addRecordingMetadata(toolResult)
+		w.recordMessage("response", "tool_call", "server_reconnect", "proxy", toolResult)
+		return toolResult, nil
 	}
 	
 	// Update server info
@@ -605,7 +723,10 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 		resultMsg = fmt.Sprintf("Reconnected server '%s' using STORED configuration\nServer now connected and tools updated.", name)
 	}
 
-	return mcp.NewToolResultText(resultMsg), nil
+	toolResult := mcp.NewToolResultText(resultMsg)
+	toolResult = w.addRecordingMetadata(toolResult)
+	w.recordMessage("response", "tool_call", "server_reconnect", "proxy", toolResult)
+	return toolResult, nil
 }
 
 // createDynamicProxyHandler creates a handler that checks connection status
@@ -620,6 +741,7 @@ func (w *DynamicWrapper) createDynamicProxyHandler(serverName, originalToolName 
 		
 		if !exists {
 			result := mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", serverName))
+			result = w.addRecordingMetadata(result)
 			w.recordMessage("response", "tool_call", prefixedToolName, serverName, result)
 			return result, nil
 		}
@@ -631,6 +753,7 @@ func (w *DynamicWrapper) createDynamicProxyHandler(serverName, originalToolName 
 			}
 			errorMsg += "\nUse server_reconnect to restore connection."
 			result := mcp.NewToolResultError(errorMsg)
+			result = w.addRecordingMetadata(result)
 			w.recordMessage("response", "tool_call", prefixedToolName, serverName, result)
 			return result, nil
 		}
@@ -651,9 +774,10 @@ func (w *DynamicWrapper) createDynamicProxyHandler(serverName, originalToolName 
 				serverInfo.IsConnected = false
 				serverInfo.ErrorMessage = err.Error()
 				w.mu.Unlock()
-				
+
 				errorMsg := fmt.Sprintf("Server '%s' connection failed: %v\nUse server_reconnect to restore connection.", serverName, err)
 				result := mcp.NewToolResultError(errorMsg)
+				result = w.addRecordingMetadata(result)
 				w.recordMessage("response", "tool_call", prefixedToolName, serverName, result)
 				return result, nil
 			}
@@ -661,6 +785,7 @@ func (w *DynamicWrapper) createDynamicProxyHandler(serverName, originalToolName 
 			// Wrap error with server context
 			errorMsg := fmt.Sprintf("[%s] %v", serverName, err)
 			result := mcp.NewToolResultError(errorMsg)
+			result = w.addRecordingMetadata(result)
 			w.recordMessage("response", "tool_call", prefixedToolName, serverName, result)
 			return result, nil
 		}
@@ -688,7 +813,8 @@ func (w *DynamicWrapper) createDynamicProxyHandler(serverName, originalToolName 
 				finalResult = mcp.NewToolResultText("Tool executed successfully")
 			}
 		}
-		
+
+		finalResult = w.addRecordingMetadata(finalResult)
 		w.recordMessage("response", "tool_call", prefixedToolName, serverName, finalResult)
 		return finalResult, nil
 	}

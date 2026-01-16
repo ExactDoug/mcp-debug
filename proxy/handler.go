@@ -16,7 +16,8 @@ type RecorderFunc func(direction, messageType, toolName, serverName string, mess
 
 // CreateProxyHandler creates a handler that forwards tool calls to remote servers
 // The optional recorder function enables recording of tool call traffic
-func CreateProxyHandler(mcpClient client.MCPClient, remoteTool discovery.RemoteTool, recorder RecorderFunc) server.ToolHandlerFunc {
+// The optional metadataFunc injects metadata into tool results (e.g., recording info)
+func CreateProxyHandler(mcpClient client.MCPClient, remoteTool discovery.RemoteTool, recorder RecorderFunc, metadataFunc func(*mcp.CallToolResult) *mcp.CallToolResult) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		// Record the request if recorder is provided
 		if recorder != nil {
@@ -26,6 +27,10 @@ func CreateProxyHandler(mcpClient client.MCPClient, remoteTool discovery.RemoteT
 		args, err := extractArguments(request)
 		if err != nil {
 			errResult := mcp.NewToolResultError(fmt.Sprintf("Failed to extract arguments: %v", err))
+			// Inject metadata if function provided
+			if metadataFunc != nil {
+				errResult = metadataFunc(errResult)
+			}
 			if recorder != nil {
 				recorder("response", "tool_call", remoteTool.PrefixedName, remoteTool.ServerName, errResult)
 			}
@@ -38,6 +43,10 @@ func CreateProxyHandler(mcpClient client.MCPClient, remoteTool discovery.RemoteT
 			// Wrap error with server context
 			errorMsg := fmt.Sprintf("[%s] %v", remoteTool.ServerName, err)
 			errResult := mcp.NewToolResultError(errorMsg)
+			// Inject metadata if function provided
+			if metadataFunc != nil {
+				errResult = metadataFunc(errResult)
+			}
 			if recorder != nil {
 				recorder("response", "tool_call", remoteTool.PrefixedName, remoteTool.ServerName, errResult)
 			}
@@ -46,6 +55,11 @@ func CreateProxyHandler(mcpClient client.MCPClient, remoteTool discovery.RemoteT
 		
 		// Transform the result back to MCP format
 		mcpResult := transformResult(result)
+
+		// Inject metadata if function provided
+		if metadataFunc != nil {
+			mcpResult = metadataFunc(mcpResult)
+		}
 
 		// Record the response if recorder is provided
 		if recorder != nil {
@@ -139,7 +153,7 @@ func (r *ToolRegistry) GetAllTools() []discovery.RemoteTool {
 }
 
 // CreateHandlerForTool creates a proxy handler for a specific tool
-func (r *ToolRegistry) CreateHandlerForTool(prefixedToolName string, recorder RecorderFunc) (server.ToolHandlerFunc, error) {
+func (r *ToolRegistry) CreateHandlerForTool(prefixedToolName string, recorder RecorderFunc, metadataFunc func(*mcp.CallToolResult) *mcp.CallToolResult) (server.ToolHandlerFunc, error) {
 	// Get tool metadata
 	tool, exists := r.GetTool(prefixedToolName)
 	if !exists {
@@ -152,6 +166,6 @@ func (r *ToolRegistry) CreateHandlerForTool(prefixedToolName string, recorder Re
 		return nil, fmt.Errorf("client not found for server: %s", tool.ServerName)
 	}
 
-	// Create and return the handler with optional recorder
-	return CreateProxyHandler(mcpClient, tool, recorder), nil
+	// Create and return the handler with optional recorder and metadata function
+	return CreateProxyHandler(mcpClient, tool, recorder, metadataFunc), nil
 }
