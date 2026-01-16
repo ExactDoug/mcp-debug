@@ -29,6 +29,7 @@ type StdioClient struct {
 
 	connected bool
 	mu        sync.Mutex
+	requestMu sync.Mutex  // Serialize all I/O operations
 }
 
 // NewStdioClient creates a new stdio-based MCP client
@@ -244,57 +245,46 @@ func (c *StdioClient) IsConnected() bool {
 
 // sendRequest sends a JSON-RPC request and waits for response
 func (c *StdioClient) sendRequest(ctx context.Context, request *JSONRPCRequest) (*JSONRPCResponse, error) {
+	// Serialize all I/O operations
+	c.requestMu.Lock()
+	defer c.requestMu.Unlock()
+
+	// Check connected state while holding lock
+	if !c.connected {
+		return nil, fmt.Errorf("client not connected")
+	}
+
 	// Set timeout for the request
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	
+
 	// Serialize request
 	requestBytes, err := json.Marshal(request)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
-	
-	// Send request
+
+	// Send request - now protected by mutex
 	requestLine := append(requestBytes, '\n')
 	if _, err := c.stdin.Write(requestLine); err != nil {
 		return nil, fmt.Errorf("failed to write request: %w", err)
 	}
-	
-	// Read response with timeout
-	responseChan := make(chan *JSONRPCResponse, 1)
-	errorChan := make(chan error, 1)
-	
-	go func() {
-		// Read response line
-		responseLine, err := c.reader.ReadBytes('\n')
-		if err != nil {
-			errorChan <- fmt.Errorf("failed to read response: %w", err)
-			return
-		}
-		
-		// Parse response
-		var response JSONRPCResponse
-		if err := json.Unmarshal(responseLine, &response); err != nil {
-			errorChan <- fmt.Errorf("failed to unmarshal response: %w", err)
-			return
-		}
-		
-		// Verify response ID matches request ID
-		if response.ID != request.ID {
-			errorChan <- fmt.Errorf("response ID %d does not match request ID %d", response.ID, request.ID)
-			return
-		}
-		
-		responseChan <- &response
-	}()
-	
-	// Wait for response or timeout
-	select {
-	case response := <-responseChan:
-		return response, nil
-	case err := <-errorChan:
-		return nil, err
-	case <-ctx.Done():
-		return nil, fmt.Errorf("request timeout: %w", ctx.Err())
+
+	// Read response - now protected by mutex
+	responseLine, err := c.reader.ReadBytes('\n')
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
+
+	// Parse and validate response
+	var response JSONRPCResponse
+	if err := json.Unmarshal(responseLine, &response); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	if response.ID != request.ID {
+		return nil, fmt.Errorf("response ID mismatch: expected %d, got %d", request.ID, response.ID)
+	}
+
+	return &response, nil
 }

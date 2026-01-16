@@ -17,13 +17,14 @@ import (
 
 // ProxyServer manages the complete MCP proxy server
 type ProxyServer struct {
-	config       *config.ProxyConfig
-	mcpServer    *server.MCPServer
-	registry     *proxy.ToolRegistry
-	clients      []client.MCPClient
-	discoverer   *discovery.Discoverer
-	recorderFunc proxy.RecorderFunc // Optional recorder for tool call traffic
-	metadataFunc func(*mcp.CallToolResult) *mcp.CallToolResult // Optional metadata injector
+	config           *config.ProxyConfig
+	mcpServer        *server.MCPServer
+	registry         *proxy.ToolRegistry
+	clients          []client.MCPClient
+	discoverer       *discovery.Discoverer
+	discoveryResults []*discovery.DiscoveryResult // Store for populateStaticServers access
+	recorderFunc     proxy.RecorderFunc // Optional recorder for tool call traffic
+	metadataFunc     func(*mcp.CallToolResult) *mcp.CallToolResult // Optional metadata injector
 
 	mu           sync.RWMutex
 	initialized  bool
@@ -66,7 +67,10 @@ func (p *ProxyServer) Initialize(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to discover tools: %w", err)
 	}
-	
+
+	// Store results for populateStaticServers to access
+	p.discoveryResults = results
+
 	// Process discovery results
 	successfulResults := discovery.GetSuccessfulResults(results)
 	failedResults := discovery.GetFailedResults(results)

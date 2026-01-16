@@ -186,10 +186,19 @@ func (w *DynamicWrapper) addRecordingMetadata(result *mcp.CallToolResult) *mcp.C
 	// Create metadata content item
 	metadataItem := mcp.NewTextContent(metadataText)
 
-	// Append to existing content
-	result.Content = append(result.Content, metadataItem)
+	// Copy-on-write to avoid mutating input
+	newResult := &mcp.CallToolResult{
+		Content: make([]mcp.Content, len(result.Content), len(result.Content)+1),
+		IsError: result.IsError,
+	}
 
-	return result
+	// Copy existing content
+	copy(newResult.Content, result.Content)
+
+	// Append metadata to NEW slice
+	newResult.Content = append(newResult.Content, metadataItem)
+
+	return newResult
 }
 
 func (w *DynamicWrapper) registerManagementTools() {
@@ -735,18 +744,25 @@ func (w *DynamicWrapper) createDynamicProxyHandler(serverName, originalToolName 
 		// Record the tool call request
 		prefixedToolName := fmt.Sprintf("%s_%s", serverName, originalToolName)
 		w.recordMessage("request", "tool_call", prefixedToolName, serverName, request)
+
+		// Copy client reference while holding lock to prevent use-after-free
 		w.mu.RLock()
 		serverInfo, exists := w.dynamicServers[serverName]
+		var client client.MCPClient
+		if exists && serverInfo.IsConnected {
+			client = serverInfo.Client  // Copy reference
+		}
 		w.mu.RUnlock()
-		
+
 		if !exists {
 			result := mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", serverName))
 			result = w.addRecordingMetadata(result)
 			w.recordMessage("response", "tool_call", prefixedToolName, serverName, result)
 			return result, nil
 		}
-		
-		if !serverInfo.IsConnected {
+
+		if client == nil {
+			// Server disconnected
 			errorMsg := fmt.Sprintf("Server '%s' is disconnected", serverName)
 			if serverInfo.ErrorMessage != "" {
 				errorMsg += fmt.Sprintf(": %s", serverInfo.ErrorMessage)
@@ -757,16 +773,17 @@ func (w *DynamicWrapper) createDynamicProxyHandler(serverName, originalToolName 
 			w.recordMessage("response", "tool_call", prefixedToolName, serverName, result)
 			return result, nil
 		}
-		
+
 		// Extract arguments from the request
 		args := request.GetArguments()
 		argsMap := make(map[string]interface{})
 		for key, value := range args {
 			argsMap[key] = value
 		}
-		
-		// Forward the call to the remote server
-		result, err := serverInfo.Client.CallTool(ctx, originalToolName, argsMap)
+
+		// Forward the call to the remote server using copied client reference
+		// (safe from concurrent disconnect)
+		result, err := client.CallTool(ctx, originalToolName, argsMap)
 		if err != nil {
 			// Mark server as disconnected on connection errors
 			if isConnectionError(err) {
@@ -861,33 +878,52 @@ func (w *DynamicWrapper) populateStaticServers() error {
 			}
 		}
 
-		if matchingClient == nil {
-			log.Printf("Warning: No client found for static server %s", serverConfig.Name)
-			continue
-		}
-
-		// Extract tool names from registry for this server
-		allTools := w.proxyServer.registry.GetAllTools()
-		var serverTools []string
-		for _, tool := range allTools {
-			if tool.ServerName == serverConfig.Name {
-				serverTools = append(serverTools, tool.PrefixedName)
+		if matchingClient != nil {
+			// SUCCESS: Server connected, add with tools
+			allTools := w.proxyServer.registry.GetAllTools()
+			var serverTools []string
+			for _, tool := range allTools {
+				if tool.ServerName == serverConfig.Name {
+					serverTools = append(serverTools, tool.PrefixedName)
+				}
 			}
-		}
 
-		// Create DynamicServerInfo with full config
-		serverInfo := &DynamicServerInfo{
-			Name:        serverConfig.Name,
-			Client:      matchingClient,
-			Config:      serverConfig,  // Stores FULL config including env vars
-			Tools:       serverTools,
-			IsConnected: true,
-			ErrorMessage: "",
-		}
+			serverInfo := &DynamicServerInfo{
+				Name:         serverConfig.Name,
+				Client:       matchingClient,
+				Config:       serverConfig,
+				Tools:        serverTools,
+				IsConnected:  true,
+				ErrorMessage: "",
+			}
+			w.dynamicServers[serverConfig.Name] = serverInfo
+			log.Printf("Added static server '%s' to dynamic management with %d tools",
+				serverConfig.Name, len(serverTools))
+		} else {
+			// FAILED: No client, but still add to enable reconnect
+			var errorMsg string
+			for _, result := range w.proxyServer.discoveryResults {
+				if result.ServerName == serverConfig.Name && result.Error != nil {
+					errorMsg = result.Error.Error()
+					break
+				}
+			}
+			if errorMsg == "" {
+				errorMsg = "Failed to connect during initialization"
+			}
 
-		w.dynamicServers[serverConfig.Name] = serverInfo
-		log.Printf("Added static server '%s' to dynamic management with %d tools",
-			serverConfig.Name, len(serverTools))
+			serverInfo := &DynamicServerInfo{
+				Name:         serverConfig.Name,
+				Client:       nil,
+				Config:       serverConfig,  // Store config for reconnect
+				Tools:        []string{},
+				IsConnected:  false,
+				ErrorMessage: errorMsg,
+			}
+			w.dynamicServers[serverConfig.Name] = serverInfo
+			log.Printf("Added static server '%s' to dynamic management (disconnected: %s)",
+				serverConfig.Name, errorMsg)
+		}
 	}
 
 	return nil
