@@ -182,3 +182,74 @@ This creates race conditions where:
 3. Tool call fails even though client is actually connected
 
 The fix is to make ALL accesses to `connected` use the mutex, matching the pattern already used in sendRequest().
+
+## UPDATE: Mutex Fixes Completed But Issue Persists
+
+**Status**: All mutex protection and debug logging has been implemented (commit 81c9f04), but tool calls still fail after server_reconnect.
+
+**New Debug Evidence** (from user testing after mutex fixes):
+```
+04:33:54 - [DEBUG] StdioClient.Connect() SUCCESS: datto-rmm - connected=true  ← NEW CLIENT
+04:34:57 - [DEBUG] CallTool(datto-rmm, account_devices): connected=false      ← OLD CLIENT
+```
+
+**Critical Discovery**: The debug logs prove that CallTool() is being invoked on the OLD disconnected client, not the NEW connected client created by server_reconnect.
+
+## Actual Root Cause: Handler Closure Captures Stale Client Reference
+
+The mutex hypothesis was incorrect. The real bug is in how tool handlers are registered:
+
+### Static Servers (BROKEN)
+Static servers from config.yaml use `proxy.CreateProxyHandler()` which captures the mcpClient reference in a closure at initialization time:
+
+**File**: `integration/proxy_server.go` lines 102-115
+```go
+for _, tool := range result.Tools {
+    // Create proxy handler - CAPTURES mcpClient IN CLOSURE
+    handler := proxy.CreateProxyHandler(mcpClient, tool, ...)
+    p.mcpServer.AddTool(mcpTool, handler)
+}
+```
+
+**File**: `proxy/handler.go` line 20
+```go
+func CreateProxyHandler(mcpClient client.MCPClient, ...) {
+    return func(...) {
+        // mcpClient is CAPTURED in closure - IMMUTABLE
+        result, err := mcpClient.CallTool(...)
+    }
+}
+```
+
+When server_reconnect creates a new client, the handler closure still references the old captured client.
+
+### Dynamic Servers (WORKING)
+Dynamic servers from server_add use `createDynamicProxyHandler()` which looks up the current client at call time:
+
+**File**: `integration/dynamic_wrapper.go` lines 768-780
+```go
+func (w *DynamicWrapper) createDynamicProxyHandler(serverName, originalToolName string) {
+    return func(...) {
+        // Looks up CURRENT client at call time
+        w.mu.RLock()
+        serverInfo := w.dynamicServers[serverName]
+        client := serverInfo.Client  // Gets current client
+        w.mu.RUnlock()
+
+        client.CallTool(...)  // Uses current client
+    }
+}
+```
+
+This pattern doesn't capture the client, so reconnect automatically provides the new client.
+
+## Solution
+
+Make static servers use the dynamic handler pattern:
+1. Remove static handler creation from proxy_server.go (lines 102-115)
+2. Add dynamic handler creation for all tools in dynamic_wrapper.go Start()
+3. All handlers will look up current client from dynamicServers map at call time
+
+This eliminates closure-captured client references and enables hot-swapping for all servers.
+
+**Next Commit**: Implement handler pattern fix (see plan in .claude/plans/quizzical-questing-phoenix.md)
