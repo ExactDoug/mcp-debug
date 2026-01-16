@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os/exec"
 	"sync"
 	"time"
@@ -29,6 +30,7 @@ type StdioClient struct {
 
 	connected bool
 	mu        sync.Mutex
+	requestMu sync.Mutex  // Serialize all I/O operations
 }
 
 // NewStdioClient creates a new stdio-based MCP client
@@ -106,14 +108,20 @@ func (c *StdioClient) Connect(ctx context.Context) error {
 		stdout.Close()
 		return fmt.Errorf("failed to start MCP server: %w", err)
 	}
-	
+
 	c.connected = true
+	log.Printf("[DEBUG] StdioClient.Connect() SUCCESS: %s - connected=%v", c.serverName, c.connected)
 	return nil
 }
 
 // Initialize performs MCP protocol handshake
 func (c *StdioClient) Initialize(ctx context.Context) (*InitializeResult, error) {
-	if !c.connected {
+	// Check connected state with proper mutex
+	c.mu.Lock()
+	connected := c.connected
+	c.mu.Unlock()
+
+	if !connected {
 		return nil, fmt.Errorf("client not connected")
 	}
 	
@@ -137,7 +145,12 @@ func (c *StdioClient) Initialize(ctx context.Context) (*InitializeResult, error)
 
 // ListTools discovers available tools from the server
 func (c *StdioClient) ListTools(ctx context.Context) ([]ToolInfo, error) {
-	if !c.connected {
+	// Check connected state with proper mutex
+	c.mu.Lock()
+	connected := c.connected
+	c.mu.Unlock()
+
+	if !connected {
 		return nil, fmt.Errorf("client not connected")
 	}
 	
@@ -163,7 +176,15 @@ func (c *StdioClient) ListTools(ctx context.Context) ([]ToolInfo, error) {
 
 // CallTool invokes a specific tool with arguments
 func (c *StdioClient) CallTool(ctx context.Context, name string, args map[string]interface{}) (*CallToolResult, error) {
-	if !c.connected {
+	// Check connected state with proper mutex
+	c.mu.Lock()
+	connected := c.connected
+	c.mu.Unlock()
+
+	log.Printf("[DEBUG] CallTool(%s, %s): connected=%v", c.serverName, name, connected)
+
+	if !connected {
+		log.Printf("[DEBUG] CallTool(%s, %s): FAILED - client not connected", c.serverName, name)
 		return nil, fmt.Errorf("client not connected")
 	}
 	
@@ -220,13 +241,14 @@ func (c *StdioClient) Close() error {
 			// Process kill is expected to cause exit error, so ignore
 		}
 	}
-	
+
 	c.connected = false
-	
+	log.Printf("[DEBUG] StdioClient.Close(): %s - connected=%v", c.serverName, c.connected)
+
 	if len(errs) > 0 {
 		return fmt.Errorf("errors during close: %v", errs)
 	}
-	
+
 	return nil
 }
 
@@ -244,57 +266,50 @@ func (c *StdioClient) IsConnected() bool {
 
 // sendRequest sends a JSON-RPC request and waits for response
 func (c *StdioClient) sendRequest(ctx context.Context, request *JSONRPCRequest) (*JSONRPCResponse, error) {
+	// Check connected state with proper mutex
+	c.mu.Lock()
+	connected := c.connected
+	c.mu.Unlock()
+
+	if !connected {
+		return nil, fmt.Errorf("client not connected")
+	}
+
+	// Serialize all I/O operations
+	c.requestMu.Lock()
+	defer c.requestMu.Unlock()
+
 	// Set timeout for the request
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	
+
 	// Serialize request
 	requestBytes, err := json.Marshal(request)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
-	
-	// Send request
+
+	// Send request - now protected by mutex
 	requestLine := append(requestBytes, '\n')
 	if _, err := c.stdin.Write(requestLine); err != nil {
 		return nil, fmt.Errorf("failed to write request: %w", err)
 	}
-	
-	// Read response with timeout
-	responseChan := make(chan *JSONRPCResponse, 1)
-	errorChan := make(chan error, 1)
-	
-	go func() {
-		// Read response line
-		responseLine, err := c.reader.ReadBytes('\n')
-		if err != nil {
-			errorChan <- fmt.Errorf("failed to read response: %w", err)
-			return
-		}
-		
-		// Parse response
-		var response JSONRPCResponse
-		if err := json.Unmarshal(responseLine, &response); err != nil {
-			errorChan <- fmt.Errorf("failed to unmarshal response: %w", err)
-			return
-		}
-		
-		// Verify response ID matches request ID
-		if response.ID != request.ID {
-			errorChan <- fmt.Errorf("response ID %d does not match request ID %d", response.ID, request.ID)
-			return
-		}
-		
-		responseChan <- &response
-	}()
-	
-	// Wait for response or timeout
-	select {
-	case response := <-responseChan:
-		return response, nil
-	case err := <-errorChan:
-		return nil, err
-	case <-ctx.Done():
-		return nil, fmt.Errorf("request timeout: %w", ctx.Err())
+
+	// Read response - now protected by mutex
+	responseLine, err := c.reader.ReadBytes('\n')
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
+
+	// Parse and validate response
+	var response JSONRPCResponse
+	if err := json.Unmarshal(responseLine, &response); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	if response.ID != request.ID {
+		return nil, fmt.Errorf("response ID mismatch: expected %d, got %d", request.ID, response.ID)
+	}
+
+	return &response, nil
 }
