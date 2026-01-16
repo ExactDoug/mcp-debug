@@ -245,14 +245,18 @@ func (c *StdioClient) IsConnected() bool {
 
 // sendRequest sends a JSON-RPC request and waits for response
 func (c *StdioClient) sendRequest(ctx context.Context, request *JSONRPCRequest) (*JSONRPCResponse, error) {
+	// Check connected state with proper mutex
+	c.mu.Lock()
+	connected := c.connected
+	c.mu.Unlock()
+
+	if !connected {
+		return nil, fmt.Errorf("client not connected")
+	}
+
 	// Serialize all I/O operations
 	c.requestMu.Lock()
 	defer c.requestMu.Unlock()
-
-	// Check connected state while holding lock
-	if !c.connected {
-		return nil, fmt.Errorf("client not connected")
-	}
 
 	// Set timeout for the request
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
