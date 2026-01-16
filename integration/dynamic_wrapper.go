@@ -199,14 +199,13 @@ func (w *DynamicWrapper) registerManagementTools() {
 	
 	// server_reconnect tool
 	reconnectTool := mcp.NewTool("server_reconnect",
-		mcp.WithDescription("Reconnect a server with new command (use after server_disconnect)"),
+		mcp.WithDescription("Reconnect a server with optional new command (use after server_disconnect)"),
 		mcp.WithString("name",
 			mcp.Required(),
 			mcp.Description("Name of the server to reconnect"),
 		),
 		mcp.WithString("command",
-			mcp.Required(),
-			mcp.Description("New command to run (e.g., 'npx -y @modelcontextprotocol/filesystem /path')"),
+			mcp.Description("New command to run. If omitted, uses stored configuration from config.yaml."),
 		),
 	)
 	
@@ -466,48 +465,69 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 	if err != nil {
 		return mcp.NewToolResultError("name is required"), nil
 	}
-	
-	command, err := request.RequireString("command")
-	if err != nil {
-		return mcp.NewToolResultError("command is required"), nil
-	}
-	
+
+	// Get command (optional now)
+	commandStr := request.GetString("command", "")
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	
+
 	serverInfo, exists := w.dynamicServers[name]
 	if !exists {
 		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name)), nil
 	}
-	
+
 	if serverInfo.IsConnected {
 		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' is still connected. Use server_disconnect first.", name)), nil
 	}
-	
-	log.Printf("Reconnecting server '%s' with new command: %s", name, command)
-	
-	// Parse new command
-	parts := strings.Fields(command)
-	if len(parts) == 0 {
-		return mcp.NewToolResultError("Invalid command"), nil
-	}
-	
-	// Update server config
-	serverConfig := config.ServerConfig{
-		Name:      name,
-		Prefix:    name,
-		Transport: "stdio",
-		Command:   parts[0],
-		Args:      parts[1:],
-		Timeout:   "30s",
-	}
-	
-	// Create and connect new client
-	stdioClient := client.NewStdioClient(name, serverConfig.Command, serverConfig.Args)
 
-	// Use default inheritance (tier1 or proxy defaults)
+	var serverConfig config.ServerConfig
+
+	if commandStr != "" {
+		// Command provided: parse and create new config
+		log.Printf("Reconnecting server '%s' with NEW command: %s", name, commandStr)
+
+		parts := strings.Fields(commandStr)
+		if len(parts) == 0 {
+			return mcp.NewToolResultError("Invalid command"), nil
+		}
+
+		// Create new config (preserves name/prefix, but loses env vars)
+		serverConfig = config.ServerConfig{
+			Name:      name,
+			Prefix:    serverInfo.Config.Prefix,
+			Transport: "stdio",
+			Command:   parts[0],
+			Args:      parts[1:],
+			Timeout:   "30s",
+		}
+	} else {
+		// Command omitted: use stored config
+		log.Printf("Reconnecting server '%s' with STORED configuration", name)
+
+		if serverInfo.Config.Command == "" {
+			return mcp.NewToolResultError("Stored config has no command. Please provide command parameter."), nil
+		}
+
+		// Use stored config as-is (preserves env, inherit, timeout, etc.)
+		serverConfig = serverInfo.Config
+	}
+
+	// Create and connect new client
+	stdioClient := client.NewStdioClient(serverConfig.Name, serverConfig.Command, serverConfig.Args)
+
+	// Apply inheritance config from stored ServerConfig
 	inheritCfg := serverConfig.ResolveInheritConfig(w.proxyServer.config.Inherit)
 	stdioClient.SetInheritConfig(inheritCfg)
+
+	// Apply environment variables from stored ServerConfig
+	if len(serverConfig.Env) > 0 {
+		var env []string
+		for key, value := range serverConfig.Env {
+			env = append(env, fmt.Sprintf("%s=%s", key, value))
+		}
+		stdioClient.SetEnvironment(env)
+	}
 
 	if err := stdioClient.Connect(ctx); err != nil {
 		// Mark as disconnected but keep tools registered
@@ -575,11 +595,17 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 			log.Printf("Updated tool registration: %s", prefixedName)
 		}
 	}
-	
-	result := fmt.Sprintf("Reconnected server '%s' with command: %s %s\\nServer now connected and tools updated.",
-		name, serverConfig.Command, strings.Join(serverConfig.Args, " "))
-	
-	return mcp.NewToolResultText(result), nil
+
+	// Build result message based on how we reconnected
+	var resultMsg string
+	if commandStr != "" {
+		resultMsg = fmt.Sprintf("Reconnected server '%s' with NEW command: %s %s\nServer now connected and tools updated.",
+			name, serverConfig.Command, strings.Join(serverConfig.Args, " "))
+	} else {
+		resultMsg = fmt.Sprintf("Reconnected server '%s' using STORED configuration\nServer now connected and tools updated.", name)
+	}
+
+	return mcp.NewToolResultText(resultMsg), nil
 }
 
 // createDynamicProxyHandler creates a handler that checks connection status
@@ -681,7 +707,64 @@ func isConnectionError(err error) bool {
 // Initialize initializes the proxy with static servers
 func (w *DynamicWrapper) Initialize(ctx context.Context) error {
 	// Initialize the proxy server with static servers
-	return w.proxyServer.Initialize(ctx)
+	if err := w.proxyServer.Initialize(ctx); err != nil {
+		return err
+	}
+
+	// Populate dynamicServers map with static servers
+	if err := w.populateStaticServers(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// populateStaticServers adds static servers from config to dynamicServers map
+func (w *DynamicWrapper) populateStaticServers() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// Iterate through static server configs
+	for _, serverConfig := range w.proxyServer.config.Servers {
+		// Find matching client by ServerName
+		var matchingClient client.MCPClient
+		for _, c := range w.proxyServer.clients {
+			if c.ServerName() == serverConfig.Name {
+				matchingClient = c
+				break
+			}
+		}
+
+		if matchingClient == nil {
+			log.Printf("Warning: No client found for static server %s", serverConfig.Name)
+			continue
+		}
+
+		// Extract tool names from registry for this server
+		allTools := w.proxyServer.registry.GetAllTools()
+		var serverTools []string
+		for _, tool := range allTools {
+			if tool.ServerName == serverConfig.Name {
+				serverTools = append(serverTools, tool.PrefixedName)
+			}
+		}
+
+		// Create DynamicServerInfo with full config
+		serverInfo := &DynamicServerInfo{
+			Name:        serverConfig.Name,
+			Client:      matchingClient,
+			Config:      serverConfig,  // Stores FULL config including env vars
+			Tools:       serverTools,
+			IsConnected: true,
+			ErrorMessage: "",
+		}
+
+		w.dynamicServers[serverConfig.Name] = serverInfo
+		log.Printf("Added static server '%s' to dynamic management with %d tools",
+			serverConfig.Name, len(serverTools))
+	}
+
+	return nil
 }
 
 // Start starts the MCP server
