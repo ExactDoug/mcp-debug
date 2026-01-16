@@ -24,6 +24,25 @@ mcp-debug --proxy --config config.yaml --record session.jsonl
 cat session.jsonl
 ```
 
+## Recording Metadata in Tool Responses
+
+When recording is enabled, mcp-debug automatically adds metadata to all tool responses informing you that the session is being recorded:
+
+```
+📹 Recording: session.jsonl
+   Full path: /mnt/c/dev/projects/github/mcp-debug/session.jsonl
+   Purpose: JSON-RPC message log for debugging and playback testing
+```
+
+This metadata:
+- Appears in all tool responses (static, dynamic, and management tools)
+- Includes both the relative path (as specified) and absolute path
+- Is added to the MCP response Content array (protocol-compliant)
+- Only appears when `--record` flag is used
+- Does not affect recording format or playback functionality
+
+The metadata is purely informational and can be safely ignored by automation tools.
+
 ## Recording Format
 
 Recordings use **JSONL** (JSON Lines) format - one JSON object per line:

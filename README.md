@@ -22,6 +22,7 @@ MCP Debug enables rapid development and testing of MCP servers with hot-swapping
 - Record JSON-RPC traffic for debugging and documentation
 - Records all tool calls (static and dynamic servers)
 - Records management operations (server_add, etc.)
+- Tool responses include recording metadata when active
 - Playback client mode - replay requests to test servers
 - Playback server mode - replay responses to test clients
 - Regression testing with recorded sessions

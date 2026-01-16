@@ -23,6 +23,7 @@ type ProxyServer struct {
 	clients      []client.MCPClient
 	discoverer   *discovery.Discoverer
 	recorderFunc proxy.RecorderFunc // Optional recorder for tool call traffic
+	metadataFunc func(*mcp.CallToolResult) *mcp.CallToolResult // Optional metadata injector
 
 	mu           sync.RWMutex
 	initialized  bool
@@ -100,8 +101,8 @@ func (p *ProxyServer) Initialize(ctx context.Context) error {
 			// Create MCP tool definition
 			mcpTool := p.createMCPTool(tool)
 
-			// Create proxy handler with optional recorder
-			handler := proxy.CreateProxyHandler(mcpClient, tool, p.recorderFunc)
+			// Create proxy handler with optional recorder and metadata function
+			handler := proxy.CreateProxyHandler(mcpClient, tool, p.recorderFunc, p.metadataFunc)
 
 			// Register with MCP server
 			p.mcpServer.AddTool(mcpTool, handler)
