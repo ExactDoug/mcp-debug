@@ -98,20 +98,13 @@ func (p *ProxyServer) Initialize(ctx context.Context) error {
 		
 		p.clients = append(p.clients, mcpClient)
 		
-		// Register tools and create handlers
+		// Register tools in registry
 		for _, tool := range result.Tools {
 			p.registry.RegisterTool(tool, mcpClient)
 
-			// Create MCP tool definition
-			mcpTool := p.createMCPTool(tool)
-
-			// Create proxy handler with optional recorder and metadata function
-			handler := proxy.CreateProxyHandler(mcpClient, tool, p.recorderFunc, p.metadataFunc)
-
-			// Register with MCP server
-			p.mcpServer.AddTool(mcpTool, handler)
-
-			log.Printf("Registered tool: %s", tool.PrefixedName)
+			// Note: Handlers will be created by DynamicWrapper using dynamic lookup pattern
+			// This allows hot-swapping to work correctly for static servers
+			log.Printf("Registered tool in registry (handler to be created by wrapper): %s", tool.PrefixedName)
 		}
 	}
 	

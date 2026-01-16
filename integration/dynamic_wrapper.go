@@ -885,6 +885,10 @@ func (w *DynamicWrapper) Initialize(ctx context.Context) error {
 		return err
 	}
 
+	// Create dynamic handlers for ALL tools (including static servers)
+	// This allows hot-swapping to work correctly for all servers
+	w.createHandlersForAllTools()
+
 	return nil
 }
 
@@ -953,6 +957,28 @@ func (w *DynamicWrapper) populateStaticServers() error {
 	}
 
 	return nil
+}
+
+// createHandlersForAllTools creates dynamic handlers for all registered tools
+// This allows both static and dynamic servers to use the same handler pattern
+// that looks up the current client at call time, enabling hot-swapping
+func (w *DynamicWrapper) createHandlersForAllTools() {
+	allTools := w.proxyServer.registry.GetAllTools()
+
+	for _, tool := range allTools {
+		// Create MCP tool definition
+		mcpTool := mcp.NewTool(tool.PrefixedName,
+			mcp.WithDescription(fmt.Sprintf("[%s] %s", tool.ServerName, tool.Description)),
+		)
+
+		// Create dynamic handler that looks up client at call time
+		handler := w.createDynamicProxyHandler(tool.ServerName, tool.OriginalName)
+
+		// Register with MCP server
+		w.baseServer.AddTool(mcpTool, handler)
+
+		log.Printf("Registered tool with dynamic handler: %s", tool.PrefixedName)
+	}
 }
 
 // Start starts the MCP server
