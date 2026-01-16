@@ -79,7 +79,7 @@ uvx mcp-debug --proxy --config config.yaml --log /tmp/debug.log
 - `server_add` - Add a server: `{name: "fs", command: "npx -y @mcp/filesystem /path"}`
 - `server_remove` - Remove server completely
 - `server_disconnect` - Disconnect server (tools return errors)
-- `server_reconnect` - Reconnect with new command
+- `server_reconnect` - Reconnect with optional new command (preserves config if omitted)
 - `server_list` - Show all servers and status
 
 ### Playback Modes
@@ -183,6 +183,8 @@ For complete documentation including all configuration options, security rationa
 
 ## Development Workflow
 
+### Dynamic Servers
+
 ```bash
 # 1. Start with empty config
 mcp-tui uvx mcp-debug --proxy --config empty-config.yaml
@@ -200,6 +202,45 @@ server_disconnect: {name: myserver}
 server_reconnect: {name: myserver, command: ./my-server-v2}
 
 # 6. Same tools work immediately with new implementation!
+```
+
+### Static Servers (from config.yaml)
+
+**NEW:** Static servers can now be hot-swapped while preserving all configuration including environment variables!
+
+```bash
+# config.yaml
+servers:
+  - name: "my-server"
+    command: "python3"
+    args: ["-m", "my_server"]
+    env:
+      API_KEY: "${MY_API_KEY}"
+      API_SECRET: "${MY_SECRET}"
+    timeout: "300s"
+
+# 1. Start proxy with config
+mcp-tui uvx mcp-debug --proxy --config config.yaml
+
+# 2. Make changes to server code
+
+# 3. Hot-swap WITHOUT exposing secrets
+server_disconnect: {name: "my-server"}
+server_reconnect: {name: "my-server"}  # No command = uses stored config
+
+# 4. Server reconnects with ALL env vars preserved!
+```
+
+**Key Benefits:**
+- Environment variables (including secrets) never exposed to MCP client
+- Inheritance settings preserved
+- Timeout and other config preserved
+- Same tools work immediately with new implementation
+
+**Alternative:** Provide new command to replace configuration:
+```bash
+server_reconnect: {name: "my-server", command: "./new-server"}
+# Warning: This loses env vars and other config from config.yaml
 ```
 
 ## CLI Commands
