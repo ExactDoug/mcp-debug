@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os/exec"
 	"sync"
 	"time"
@@ -107,14 +108,20 @@ func (c *StdioClient) Connect(ctx context.Context) error {
 		stdout.Close()
 		return fmt.Errorf("failed to start MCP server: %w", err)
 	}
-	
+
 	c.connected = true
+	log.Printf("[DEBUG] StdioClient.Connect() SUCCESS: %s - connected=%v", c.serverName, c.connected)
 	return nil
 }
 
 // Initialize performs MCP protocol handshake
 func (c *StdioClient) Initialize(ctx context.Context) (*InitializeResult, error) {
-	if !c.connected {
+	// Check connected state with proper mutex
+	c.mu.Lock()
+	connected := c.connected
+	c.mu.Unlock()
+
+	if !connected {
 		return nil, fmt.Errorf("client not connected")
 	}
 	
@@ -138,7 +145,12 @@ func (c *StdioClient) Initialize(ctx context.Context) (*InitializeResult, error)
 
 // ListTools discovers available tools from the server
 func (c *StdioClient) ListTools(ctx context.Context) ([]ToolInfo, error) {
-	if !c.connected {
+	// Check connected state with proper mutex
+	c.mu.Lock()
+	connected := c.connected
+	c.mu.Unlock()
+
+	if !connected {
 		return nil, fmt.Errorf("client not connected")
 	}
 	
@@ -164,7 +176,15 @@ func (c *StdioClient) ListTools(ctx context.Context) ([]ToolInfo, error) {
 
 // CallTool invokes a specific tool with arguments
 func (c *StdioClient) CallTool(ctx context.Context, name string, args map[string]interface{}) (*CallToolResult, error) {
-	if !c.connected {
+	// Check connected state with proper mutex
+	c.mu.Lock()
+	connected := c.connected
+	c.mu.Unlock()
+
+	log.Printf("[DEBUG] CallTool(%s, %s): connected=%v", c.serverName, name, connected)
+
+	if !connected {
+		log.Printf("[DEBUG] CallTool(%s, %s): FAILED - client not connected", c.serverName, name)
 		return nil, fmt.Errorf("client not connected")
 	}
 	
@@ -221,13 +241,14 @@ func (c *StdioClient) Close() error {
 			// Process kill is expected to cause exit error, so ignore
 		}
 	}
-	
+
 	c.connected = false
-	
+	log.Printf("[DEBUG] StdioClient.Close(): %s - connected=%v", c.serverName, c.connected)
+
 	if len(errs) > 0 {
 		return fmt.Errorf("errors during close: %v", errs)
 	}
-	
+
 	return nil
 }
 
