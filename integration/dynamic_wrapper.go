@@ -966,10 +966,14 @@ func (w *DynamicWrapper) createHandlersForAllTools() {
 	allTools := w.proxyServer.registry.GetAllTools()
 
 	for _, tool := range allTools {
-		// Create MCP tool definition
-		mcpTool := mcp.NewTool(tool.PrefixedName,
-			mcp.WithDescription(fmt.Sprintf("[%s] %s", tool.ServerName, tool.Description)),
-		)
+		// Create MCP tool definition, preserving upstream inputSchema
+		description := fmt.Sprintf("[%s] %s", tool.ServerName, tool.Description)
+		var mcpTool mcp.Tool
+		if len(tool.InputSchema) > 0 {
+			mcpTool = mcp.NewToolWithRawSchema(tool.PrefixedName, description, tool.InputSchema)
+		} else {
+			mcpTool = mcp.NewTool(tool.PrefixedName, mcp.WithDescription(description))
+		}
 
 		// Create dynamic handler that looks up client at call time
 		handler := w.createDynamicProxyHandler(tool.ServerName, tool.OriginalName)
