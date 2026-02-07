@@ -213,11 +213,14 @@ func (p *ProxyServer) createAndConnectClient(ctx context.Context, serverName str
 
 // createMCPTool creates an mcp.Tool from a RemoteTool
 func (p *ProxyServer) createMCPTool(remoteTool discovery.RemoteTool) mcp.Tool {
-	// For now, create a simple tool with basic parameters
-	// In a full implementation, we would parse the InputSchema to create proper parameter definitions
-	
+	description := fmt.Sprintf("[%s] %s", remoteTool.ServerName, remoteTool.Description)
+
+	if len(remoteTool.InputSchema) > 0 {
+		return mcp.NewToolWithRawSchema(remoteTool.PrefixedName, description, remoteTool.InputSchema)
+	}
+
 	return mcp.NewTool(remoteTool.PrefixedName,
-		mcp.WithDescription(fmt.Sprintf("[%s] %s", remoteTool.ServerName, remoteTool.Description)),
+		mcp.WithDescription(description),
 	)
 }
 
