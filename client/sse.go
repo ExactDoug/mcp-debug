@@ -20,6 +20,8 @@ import (
 // JSON-RPC responses. Other events (like heartbeats) are ignored.
 func ParseSSEResponse(reader io.Reader, expectedID int64) (*JSONRPCResponse, error) {
 	scanner := bufio.NewScanner(reader)
+	// Increase buffer for large SSE responses (e.g., tools/list with many tools)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024) // up to 4MB
 
 	var currentEvent string
 

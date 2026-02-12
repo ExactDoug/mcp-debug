@@ -15,6 +15,9 @@ type TokenData struct {
 	TokenType    string    `json:"token_type"`
 	ExpiresAt    time.Time `json:"expires_at,omitempty"`
 	Scopes       string    `json:"scopes,omitempty"`
+	// Dynamic client registration data (persisted for reuse)
+	ClientID     string `json:"client_id,omitempty"`
+	ClientSecret string `json:"client_secret,omitempty"`
 }
 
 // IsExpired returns true if the access token has expired or will expire within the buffer period.

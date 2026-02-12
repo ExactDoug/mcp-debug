@@ -178,14 +178,22 @@ func TestNewOAuthProviderFromConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("missing client_id", func(t *testing.T) {
+	t.Run("no client_id uses dynamic registration", func(t *testing.T) {
 		auth := &config.AuthConfig{
-			Type: "oauth",
+			Type:      "oauth",
+			TokenFile: "/tmp/test-dyn-reg.json",
 		}
 
-		_, err := NewOAuthProviderFromConfig(auth, "https://example.com")
-		if err == nil {
-			t.Fatal("expected error for missing client_id")
+		provider, err := NewOAuthProviderFromConfig(auth, "https://example.com")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if provider == nil {
+			t.Fatal("expected non-nil provider")
+		}
+		// client_id should be empty — will be set during dynamic registration
+		if provider.clientID != "" {
+			t.Errorf("expected empty clientID, got %s", provider.clientID)
 		}
 	})
 

@@ -89,7 +89,7 @@ func TestNewAuthProviderFromConfig_EmptyType(t *testing.T) {
 
 func TestNewAuthProviderFromConfig_UnsupportedType(t *testing.T) {
 	auth := &config.AuthConfig{
-		Type: "oauth",
+		Type: "kerberos",
 	}
 
 	_, err := NewAuthProviderFromConfig(auth)

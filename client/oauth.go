@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -77,9 +78,7 @@ func NewOAuthProvider(cfg OAuthConfig) *OAuthProvider {
 
 // NewOAuthProviderFromConfig creates an OAuthProvider from config.AuthConfig.
 func NewOAuthProviderFromConfig(auth *config.AuthConfig, serverURL string) (*OAuthProvider, error) {
-	if auth.ClientID == "" {
-		return nil, fmt.Errorf("oauth auth requires client_id")
-	}
+	// client_id is optional — dynamic registration will be used if not provided
 
 	return NewOAuthProvider(OAuthConfig{
 		ClientID:     auth.ClientID,
@@ -101,6 +100,11 @@ func (p *OAuthProvider) ApplyAuth(req *http.Request) error {
 	if p.token == nil && p.tokenStore != nil {
 		if cached, err := p.tokenStore.Load(); err == nil && cached != nil {
 			p.token = cached
+			// Restore client registration data from cache
+			if p.clientID == "" && cached.ClientID != "" {
+				p.clientID = cached.ClientID
+				p.clientSecret = cached.ClientSecret
+			}
 		}
 	}
 
@@ -145,6 +149,7 @@ func (p *OAuthProvider) RefreshToken(ctx context.Context, wwwAuth string) error 
 type authServerMetadata struct {
 	AuthorizationEndpoint string `json:"authorization_endpoint"`
 	TokenEndpoint         string `json:"token_endpoint"`
+	RegistrationEndpoint  string `json:"registration_endpoint,omitempty"`
 }
 
 // resourceMetadata holds protected resource metadata (RFC 9728).
@@ -181,7 +186,7 @@ func (p *OAuthProvider) discoverAuthServer(ctx context.Context, wwwAuth string) 
 	}
 
 	// Fetch authorization server metadata
-	authServerURL := resMeta.AuthorizationServers[0]
+	authServerURL := strings.TrimRight(resMeta.AuthorizationServers[0], "/")
 	asMetadataURL := authServerURL + "/.well-known/openid-configuration"
 
 	log.Printf("[DEBUG] OAuthProvider: fetching auth server metadata from %s", asMetadataURL)
@@ -203,12 +208,95 @@ func (p *OAuthProvider) discoverAuthServer(ctx context.Context, wwwAuth string) 
 	return asMeta, nil
 }
 
+// registerClient performs RFC 7591 Dynamic Client Registration.
+// Returns client_id and client_secret from the registration response.
+func (p *OAuthProvider) registerClient(ctx context.Context, registrationEndpoint string) (clientID, clientSecret string, err error) {
+	// Build registration request
+	regData := map[string]interface{}{
+		"client_name":                "mcp-debug",
+		"redirect_uris":             []string{fmt.Sprintf("http://localhost:%d/callback", p.redirectPort)},
+		"grant_types":               []string{"authorization_code", "refresh_token"},
+		"response_types":            []string{"code"},
+		"token_endpoint_auth_method": "client_secret_post",
+		"application_type":          "native",
+	}
+
+	body, err := json.Marshal(regData)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to marshal registration request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, registrationEndpoint, bytes.NewReader(body))
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create registration request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("registration request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to read registration response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return "", "", fmt.Errorf("registration endpoint returned HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var regResp struct {
+		ClientID     string `json:"client_id"`
+		ClientSecret string `json:"client_secret"`
+	}
+	if err := json.Unmarshal(respBody, &regResp); err != nil {
+		return "", "", fmt.Errorf("failed to parse registration response: %w", err)
+	}
+
+	if regResp.ClientID == "" {
+		return "", "", fmt.Errorf("registration response missing client_id")
+	}
+
+	return regResp.ClientID, regResp.ClientSecret, nil
+}
+
 // fullAuthorizationFlow performs the complete PKCE authorization code flow.
 func (p *OAuthProvider) fullAuthorizationFlow(ctx context.Context, wwwAuth string) error {
 	// Discover authorization server
 	asMeta, err := p.discoverAuthServer(ctx, wwwAuth)
 	if err != nil {
 		return fmt.Errorf("auth server discovery failed: %w", err)
+	}
+
+	// Dynamic client registration if no client_id configured
+	if p.clientID == "" {
+		// Check if we have cached registration from token store
+		if p.tokenStore != nil {
+			if cached, err := p.tokenStore.Load(); err == nil && cached != nil && cached.ClientID != "" {
+				log.Printf("[DEBUG] OAuthProvider: using cached client registration")
+				p.clientID = cached.ClientID
+				p.clientSecret = cached.ClientSecret
+			}
+		}
+
+		// Register if still no client_id
+		if p.clientID == "" && asMeta.RegistrationEndpoint != "" {
+			log.Printf("[DEBUG] OAuthProvider: performing dynamic client registration at %s", asMeta.RegistrationEndpoint)
+			clientID, clientSecret, err := p.registerClient(ctx, asMeta.RegistrationEndpoint)
+			if err != nil {
+				return fmt.Errorf("dynamic client registration failed: %w", err)
+			}
+			p.clientID = clientID
+			p.clientSecret = clientSecret
+			log.Printf("[DEBUG] OAuthProvider: registered as client %s", clientID)
+		}
+
+		if p.clientID == "" {
+			return fmt.Errorf("no client_id configured and server does not support dynamic registration")
+		}
 	}
 
 	// Generate PKCE parameters
@@ -270,10 +358,12 @@ func (p *OAuthProvider) fullAuthorizationFlow(ctx context.Context, wwwAuth strin
 		return fmt.Errorf("token exchange failed: %w", err)
 	}
 
-	// Store token
+	// Store token (include client registration data for persistence)
 	p.token = tokenData
+	p.token.ClientID = p.clientID
+	p.token.ClientSecret = p.clientSecret
 	if p.tokenStore != nil {
-		if err := p.tokenStore.Save(tokenData); err != nil {
+		if err := p.tokenStore.Save(p.token); err != nil {
 			log.Printf("[DEBUG] OAuthProvider: failed to save token: %v", err)
 		}
 	}
@@ -553,8 +643,9 @@ func openBrowser(url string) error {
 	case "linux":
 		// Check if running in WSL
 		if isWSL() {
-			cmd = "cmd.exe"
-			args = []string{"/c", "start", url}
+			// Use PowerShell to open URL — cmd.exe /c start breaks on & in URLs
+			cmd = "powershell.exe"
+			args = []string{"-NoProfile", "-Command", fmt.Sprintf("Start-Process '%s'", url)}
 		} else {
 			cmd = "xdg-open"
 			args = []string{url}
