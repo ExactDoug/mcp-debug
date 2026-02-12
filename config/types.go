@@ -49,10 +49,15 @@ type ServerConfig struct {
 
 // AuthConfig represents authentication configuration
 type AuthConfig struct {
-	Type     string `yaml:"type"`
-	Token    string `yaml:"token,omitempty"`
-	Username string `yaml:"username,omitempty"`
-	Password string `yaml:"password,omitempty"`
+	Type         string `yaml:"type"`
+	Token        string `yaml:"token,omitempty"`
+	Username     string `yaml:"username,omitempty"`
+	Password     string `yaml:"password,omitempty"`
+	ClientID     string `yaml:"client_id,omitempty"`
+	ClientSecret string `yaml:"client_secret,omitempty"`
+	Scopes       string `yaml:"scopes,omitempty"`
+	TokenFile    string `yaml:"token_file,omitempty"`
+	RedirectPort int    `yaml:"redirect_port,omitempty"`
 }
 
 // ProxySettings represents proxy-level settings
@@ -175,6 +180,10 @@ func (c *ProxyConfig) ExpandEnvVars() {
 			server.Auth.Token = expandEnvVar(server.Auth.Token)
 			server.Auth.Username = expandEnvVar(server.Auth.Username)
 			server.Auth.Password = expandEnvVar(server.Auth.Password)
+			server.Auth.ClientID = expandEnvVar(server.Auth.ClientID)
+			server.Auth.ClientSecret = expandEnvVar(server.Auth.ClientSecret)
+			server.Auth.Scopes = expandEnvVar(server.Auth.Scopes)
+			server.Auth.TokenFile = expandEnvVar(server.Auth.TokenFile)
 		}
 
 		// Expand server-level inheritance config

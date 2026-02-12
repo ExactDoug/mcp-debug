@@ -264,7 +264,24 @@ func (c *HTTPClient) sendHTTPRequest(ctx context.Context, request *JSONRPCReques
 		c.sessionID = sid
 	}
 
-	// Check for error status codes
+	// Handle 401 Unauthorized — try token refresh and retry once
+	if resp.StatusCode == http.StatusUnauthorized {
+		wwwAuth := resp.Header.Get("WWW-Authenticate")
+		resp.Body.Close()
+
+		if refresher, ok := c.authProvider.(TokenRefresher); ok {
+			log.Printf("[DEBUG] HTTPClient: received 401, attempting token refresh for %s", c.serverName)
+			if err := refresher.RefreshToken(ctx, wwwAuth); err != nil {
+				return nil, fmt.Errorf("authentication failed for %s: %w", c.serverName, err)
+			}
+			// Retry the request once with new token
+			return c.retrySendHTTPRequest(ctx, request)
+		}
+
+		return nil, fmt.Errorf("HTTP 401 Unauthorized for %s (no token refresher configured)", c.serverName)
+	}
+
+	// Check for other error status codes
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
@@ -284,6 +301,77 @@ func (c *HTTPClient) sendHTTPRequest(ctx context.Context, request *JSONRPCReques
 	}
 
 	// Default: application/json response
+	var response JSONRPCResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to decode JSON response: %w", err)
+	}
+
+	if response.ID != request.ID {
+		return nil, fmt.Errorf("response ID mismatch: expected %d, got %d", request.ID, response.ID)
+	}
+
+	return &response, nil
+}
+
+// retrySendHTTPRequest retries a request after token refresh.
+// This does NOT hold requestMu since it's called from sendHTTPRequest which already holds it.
+func (c *HTTPClient) retrySendHTTPRequest(ctx context.Context, request *JSONRPCRequest) (*JSONRPCResponse, error) {
+	// Marshal request to JSON
+	body, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	// Create HTTP request
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+
+	// Set required headers
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json, text/event-stream")
+	httpReq.Header.Set("MCP-Protocol-Version", "2025-06-18")
+
+	if c.sessionID != "" {
+		httpReq.Header.Set("Mcp-Session-Id", c.sessionID)
+	}
+
+	// Apply refreshed authentication
+	if c.authProvider != nil {
+		if err := c.authProvider.ApplyAuth(httpReq); err != nil {
+			return nil, fmt.Errorf("failed to apply authentication: %w", err)
+		}
+	}
+
+	// Execute retry request
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP retry request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Extract session ID
+	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
+		c.sessionID = sid
+	}
+
+	// Check for errors (no more retries)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("HTTP %d after retry: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	if resp.StatusCode == http.StatusAccepted {
+		return nil, nil
+	}
+
+	// Parse response
+	contentType := resp.Header.Get("Content-Type")
+	if strings.HasPrefix(contentType, "text/event-stream") {
+		return ParseSSEResponse(resp.Body, request.ID)
+	}
+
 	var response JSONRPCResponse
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
 		return nil, fmt.Errorf("failed to decode JSON response: %w", err)

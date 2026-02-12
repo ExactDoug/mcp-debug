@@ -29,8 +29,15 @@ func (p *BearerTokenProvider) ApplyAuth(req *http.Request) error {
 }
 
 // NewAuthProviderFromConfig creates an AuthProvider from the config.AuthConfig.
-// Returns nil if no auth is configured.
+// Returns nil if no auth is configured. For OAuth providers, use
+// NewAuthProviderFromConfigWithURL which requires the server URL.
 func NewAuthProviderFromConfig(auth *config.AuthConfig) (AuthProvider, error) {
+	return NewAuthProviderFromConfigWithURL(auth, "")
+}
+
+// NewAuthProviderFromConfigWithURL creates an AuthProvider with the server URL context.
+// The URL is needed for OAuth metadata discovery.
+func NewAuthProviderFromConfigWithURL(auth *config.AuthConfig, serverURL string) (AuthProvider, error) {
 	if auth == nil {
 		return nil, nil
 	}
@@ -41,6 +48,8 @@ func NewAuthProviderFromConfig(auth *config.AuthConfig) (AuthProvider, error) {
 			return nil, fmt.Errorf("bearer auth requires a token")
 		}
 		return &BearerTokenProvider{Token: auth.Token}, nil
+	case "oauth":
+		return NewOAuthProviderFromConfig(auth, serverURL)
 	case "":
 		return nil, nil
 	default:

@@ -198,7 +198,7 @@ func (p *ProxyServer) createAndConnectClient(ctx context.Context, serverName str
 		httpClient := client.NewHTTPClient(serverConfig.Name, serverConfig.URL)
 		httpClient.SetTimeout(serverConfig.GetServerTimeout())
 		if serverConfig.Auth != nil {
-			authProvider, err := client.NewAuthProviderFromConfig(serverConfig.Auth)
+			authProvider, err := client.NewAuthProviderFromConfigWithURL(serverConfig.Auth, serverConfig.URL)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create auth provider for %s: %w", serverConfig.Name, err)
 			}
