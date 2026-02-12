@@ -13,13 +13,6 @@ import (
 	"time"
 )
 
-// AuthProvider is an interface for applying authentication to HTTP requests.
-// Implementations include BearerTokenProvider (Phase 2) and OAuthProvider (Phase 3).
-type AuthProvider interface {
-	// ApplyAuth adds authentication headers to an HTTP request
-	ApplyAuth(req *http.Request) error
-}
-
 // HTTPClient implements MCPClient using Streamable HTTP transport.
 // It connects to MCP servers over HTTP POST with JSON-RPC payloads,
 // handling both application/json and text/event-stream responses.

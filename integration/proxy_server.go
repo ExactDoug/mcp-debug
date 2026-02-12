@@ -197,6 +197,15 @@ func (p *ProxyServer) createAndConnectClient(ctx context.Context, serverName str
 	case "http":
 		httpClient := client.NewHTTPClient(serverConfig.Name, serverConfig.URL)
 		httpClient.SetTimeout(serverConfig.GetServerTimeout())
+		if serverConfig.Auth != nil {
+			authProvider, err := client.NewAuthProviderFromConfig(serverConfig.Auth)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create auth provider for %s: %w", serverConfig.Name, err)
+			}
+			if authProvider != nil {
+				httpClient.SetAuthProvider(authProvider)
+			}
+		}
 		mcpClient = httpClient
 	default:
 		return nil, fmt.Errorf("unsupported transport: %s", serverConfig.Transport)

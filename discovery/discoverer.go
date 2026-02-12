@@ -148,6 +148,17 @@ func (d *Discoverer) createHTTPClient(serverConfig config.ServerConfig) (client.
 	httpClient := client.NewHTTPClient(serverConfig.Name, serverConfig.URL)
 	httpClient.SetTimeout(serverConfig.GetServerTimeout())
 
+	// Set auth provider if configured
+	if serverConfig.Auth != nil {
+		authProvider, err := client.NewAuthProviderFromConfig(serverConfig.Auth)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create auth provider: %w", err)
+		}
+		if authProvider != nil {
+			httpClient.SetAuthProvider(authProvider)
+		}
+	}
+
 	return httpClient, nil
 }
 

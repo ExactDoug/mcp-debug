@@ -665,6 +665,14 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 	case "http":
 		httpClient := client.NewHTTPClient(serverConfig.Name, serverConfig.URL)
 		httpClient.SetTimeout(serverConfig.GetServerTimeout())
+		if serverConfig.Auth != nil {
+			authProvider, err := client.NewAuthProviderFromConfig(serverConfig.Auth)
+			if err != nil {
+				log.Printf("Warning: failed to create auth provider for %s: %v", serverConfig.Name, err)
+			} else if authProvider != nil {
+				httpClient.SetAuthProvider(authProvider)
+			}
+		}
 		mcpClient = httpClient
 	default: // stdio
 		stdioClient := client.NewStdioClient(serverConfig.Name, serverConfig.Command, serverConfig.Args)
