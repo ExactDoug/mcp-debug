@@ -301,32 +301,47 @@ func (w *DynamicWrapper) handleServerAdd(ctx context.Context, request mcp.CallTo
 		return result, nil
 	}
 	
-	// Create server config
-	serverConfig := config.ServerConfig{
-		Name:      name,
-		Prefix:    name,
-		Transport: "stdio",
-		Command:   parts[0],
-		Args:      parts[1:],
-		Timeout:   "30s",
+	// Create server config - detect HTTP URLs
+	var serverConfig config.ServerConfig
+	var mcpClient client.MCPClient
+
+	if strings.HasPrefix(command, "http://") || strings.HasPrefix(command, "https://") {
+		// HTTP transport
+		serverConfig = config.ServerConfig{
+			Name:      name,
+			Prefix:    name,
+			Transport: "http",
+			URL:       command,
+			Timeout:   "30s",
+		}
+		httpClient := client.NewHTTPClient(name, command)
+		httpClient.SetTimeout(serverConfig.GetServerTimeout())
+		mcpClient = httpClient
+	} else {
+		// stdio transport
+		serverConfig = config.ServerConfig{
+			Name:      name,
+			Prefix:    name,
+			Transport: "stdio",
+			Command:   parts[0],
+			Args:      parts[1:],
+			Timeout:   "30s",
+		}
+		stdioClient := client.NewStdioClient(name, serverConfig.Command, serverConfig.Args)
+		inheritCfg := serverConfig.ResolveInheritConfig(w.proxyServer.config.Inherit)
+		stdioClient.SetInheritConfig(inheritCfg)
+		mcpClient = stdioClient
 	}
-	
-	// Create and connect client
-	stdioClient := client.NewStdioClient(name, serverConfig.Command, serverConfig.Args)
 
-	// Use default inheritance (tier1 or proxy defaults)
-	inheritCfg := serverConfig.ResolveInheritConfig(w.proxyServer.config.Inherit)
-	stdioClient.SetInheritConfig(inheritCfg)
-
-	if err := stdioClient.Connect(ctx); err != nil {
+	if err := mcpClient.Connect(ctx); err != nil {
 		result := mcp.NewToolResultError(fmt.Sprintf("Failed to connect: %v", err))
 		result = w.addRecordingMetadata(result)
 		w.recordMessage("response", "tool_call", "server_add", "proxy", result)
 		return result, nil
 	}
 
-	if _, err := stdioClient.Initialize(ctx); err != nil {
-		stdioClient.Close()
+	if _, err := mcpClient.Initialize(ctx); err != nil {
+		mcpClient.Close()
 		result := mcp.NewToolResultError(fmt.Sprintf("Failed to initialize: %v", err))
 		result = w.addRecordingMetadata(result)
 		w.recordMessage("response", "tool_call", "server_add", "proxy", result)
@@ -334,19 +349,19 @@ func (w *DynamicWrapper) handleServerAdd(ctx context.Context, request mcp.CallTo
 	}
 
 	// List tools
-	tools, err := stdioClient.ListTools(ctx)
+	tools, err := mcpClient.ListTools(ctx)
 	if err != nil {
-		stdioClient.Close()
+		mcpClient.Close()
 		result := mcp.NewToolResultError(fmt.Sprintf("Failed to list tools: %v", err))
 		result = w.addRecordingMetadata(result)
 		w.recordMessage("response", "tool_call", "server_add", "proxy", result)
 		return result, nil
 	}
-	
+
 	// Store server info
 	serverInfo := &DynamicServerInfo{
 		Name:        name,
-		Client:      stdioClient,
+		Client:      mcpClient,
 		Config:      serverConfig,
 		Tools:       make([]string, 0, len(tools)),
 		IsConnected: true,
@@ -365,7 +380,7 @@ func (w *DynamicWrapper) handleServerAdd(ctx context.Context, request mcp.CallTo
 		}
 		
 		// Register with proxy registry
-		w.proxyServer.registry.RegisterTool(discoveredTool, stdioClient)
+		w.proxyServer.registry.RegisterTool(discoveredTool, mcpClient)
 		
 		// Create MCP tool
 		mcpTool := w.proxyServer.createMCPTool(discoveredTool)
@@ -385,7 +400,7 @@ func (w *DynamicWrapper) handleServerAdd(ctx context.Context, request mcp.CallTo
 	w.dynamicServers[name] = serverInfo
 	
 	// Also add to proxy server's client list
-	w.proxyServer.clients = append(w.proxyServer.clients, stdioClient)
+	w.proxyServer.clients = append(w.proxyServer.clients, mcpClient)
 	
 	result := fmt.Sprintf("Added server '%s' with command: %s %s\nRegistered %d tools successfully.",
 		name, serverConfig.Command, strings.Join(serverConfig.Args, " "), registeredCount)
@@ -643,23 +658,29 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 		serverConfig = serverInfo.Config
 	}
 
-	// Create and connect new client
-	stdioClient := client.NewStdioClient(serverConfig.Name, serverConfig.Command, serverConfig.Args)
+	// Create client based on transport type
+	var mcpClient client.MCPClient
 
-	// Apply inheritance config from stored ServerConfig
-	inheritCfg := serverConfig.ResolveInheritConfig(w.proxyServer.config.Inherit)
-	stdioClient.SetInheritConfig(inheritCfg)
-
-	// Apply environment variables from stored ServerConfig
-	if len(serverConfig.Env) > 0 {
-		var env []string
-		for key, value := range serverConfig.Env {
-			env = append(env, fmt.Sprintf("%s=%s", key, value))
+	switch serverConfig.Transport {
+	case "http":
+		httpClient := client.NewHTTPClient(serverConfig.Name, serverConfig.URL)
+		httpClient.SetTimeout(serverConfig.GetServerTimeout())
+		mcpClient = httpClient
+	default: // stdio
+		stdioClient := client.NewStdioClient(serverConfig.Name, serverConfig.Command, serverConfig.Args)
+		inheritCfg := serverConfig.ResolveInheritConfig(w.proxyServer.config.Inherit)
+		stdioClient.SetInheritConfig(inheritCfg)
+		if len(serverConfig.Env) > 0 {
+			var env []string
+			for key, value := range serverConfig.Env {
+				env = append(env, fmt.Sprintf("%s=%s", key, value))
+			}
+			stdioClient.SetEnvironment(env)
 		}
-		stdioClient.SetEnvironment(env)
+		mcpClient = stdioClient
 	}
 
-	if err := stdioClient.Connect(ctx); err != nil {
+	if err := mcpClient.Connect(ctx); err != nil {
 		// Mark as disconnected but keep tools registered
 		serverInfo.IsConnected = false
 		serverInfo.ErrorMessage = fmt.Sprintf("Failed to connect: %v", err)
@@ -670,8 +691,8 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 		return toolResult, nil
 	}
 
-	if _, err := stdioClient.Initialize(ctx); err != nil {
-		stdioClient.Close()
+	if _, err := mcpClient.Initialize(ctx); err != nil {
+		mcpClient.Close()
 		serverInfo.IsConnected = false
 		serverInfo.ErrorMessage = fmt.Sprintf("Failed to initialize: %v", err)
 		serverInfo.Config = serverConfig
@@ -682,9 +703,9 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 	}
 
 	// List tools from new server
-	tools, err := stdioClient.ListTools(ctx)
+	tools, err := mcpClient.ListTools(ctx)
 	if err != nil {
-		stdioClient.Close()
+		mcpClient.Close()
 		serverInfo.IsConnected = false
 		serverInfo.ErrorMessage = fmt.Sprintf("Failed to list tools: %v", err)
 		serverInfo.Config = serverConfig
@@ -695,7 +716,7 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 	}
 	
 	// Update server info (but NOT IsConnected yet - defer until all state updated)
-	serverInfo.Client = stdioClient
+	serverInfo.Client = mcpClient
 	serverInfo.Config = serverConfig
 	serverInfo.ErrorMessage = ""
 
@@ -704,14 +725,14 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 	clientFound := false
 	for i, c := range w.proxyServer.clients {
 		if c.ServerName() == name {
-			w.proxyServer.clients[i] = stdioClient
+			w.proxyServer.clients[i] = mcpClient
 			clientFound = true
 			break
 		}
 	}
 	if !clientFound {
 		// Client not in list (was removed by disconnect), append it
-		w.proxyServer.clients = append(w.proxyServer.clients, stdioClient)
+		w.proxyServer.clients = append(w.proxyServer.clients, mcpClient)
 		log.Printf("Added client '%s' to proxy server's client list", name)
 	} else {
 		log.Printf("Updated client '%s' in proxy server's client list", name)
@@ -740,7 +761,7 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 				InputSchema:  tool.InputSchema,
 				ServerName:   name,
 			}
-			w.proxyServer.registry.RegisterTool(discoveredTool, stdioClient)
+			w.proxyServer.registry.RegisterTool(discoveredTool, mcpClient)
 			log.Printf("Updated tool registration: %s", prefixedName)
 		}
 	}

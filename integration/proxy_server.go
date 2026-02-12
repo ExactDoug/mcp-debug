@@ -194,6 +194,10 @@ func (p *ProxyServer) createAndConnectClient(ctx context.Context, serverName str
 		}
 
 		mcpClient = stdioClient
+	case "http":
+		httpClient := client.NewHTTPClient(serverConfig.Name, serverConfig.URL)
+		httpClient.SetTimeout(serverConfig.GetServerTimeout())
+		mcpClient = httpClient
 	default:
 		return nil, fmt.Errorf("unsupported transport: %s", serverConfig.Transport)
 	}
