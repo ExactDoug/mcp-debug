@@ -1,0 +1,25 @@
+# Test config for HTTP transport testing
+# Usage:
+#   1. Start HTTP echo server:  ./test-servers/http-echo-server :8080
+#   2. Start mcp-debug proxy:   ./bin/mcp-debug --proxy --config test-servers/config-http-test.yaml
+#   3. Connect with mcp-tui:    mcp-tui ./bin/mcp-debug --proxy --config test-servers/config-http-test.yaml
+
+servers:
+  # HTTP transport — connects to the echo server over Streamable HTTP
+  - name: "echo"
+    prefix: "echo"
+    transport: "http"
+    url: "http://localhost:8080/mcp"
+    timeout: "30s"
+
+  # stdio transport — connects to math server locally (verifies no regression)
+  - name: "math"
+    prefix: "math"
+    transport: "stdio"
+    command: "./test-servers/math-server"
+    timeout: "30s"
+
+proxy:
+  healthCheckInterval: "30s"
+  connectionTimeout: "10s"
+  maxRetries: 3
