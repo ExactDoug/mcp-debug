@@ -26,11 +26,37 @@ type InheritConfig struct {
 	AllowDeniedIfExplicit   bool        `yaml:"allow_denied_if_explicit,omitempty"`
 }
 
+// DashboardConfig represents dashboard web server settings.
+type DashboardConfig struct {
+	Enabled *bool `yaml:"enabled,omitempty"` // nil = default (true)
+	Port    int   `yaml:"port,omitempty"`
+}
+
+// IsEnabled returns whether the dashboard is enabled (default: true).
+func (d *DashboardConfig) IsEnabled() bool {
+	if d.Enabled != nil {
+		return *d.Enabled
+	}
+	if os.Getenv("MCP_DEBUG_NO_DASHBOARD") == "true" {
+		return false
+	}
+	return true
+}
+
+// GetPort returns the dashboard port (default: 8100).
+func (d *DashboardConfig) GetPort() int {
+	if d.Port != 0 {
+		return d.Port
+	}
+	return 8100
+}
+
 // ProxyConfig represents the main configuration for the proxy server
 type ProxyConfig struct {
-	Servers []ServerConfig `yaml:"servers"`
-	Proxy   ProxySettings  `yaml:"proxy"`
-	Inherit *InheritConfig `yaml:"inherit,omitempty"`  // NEW: proxy-level defaults
+	Servers   []ServerConfig  `yaml:"servers"`
+	Proxy     ProxySettings   `yaml:"proxy"`
+	Inherit   *InheritConfig  `yaml:"inherit,omitempty"`  // NEW: proxy-level defaults
+	Dashboard DashboardConfig `yaml:"dashboard,omitempty"`
 }
 
 // ServerConfig represents configuration for a remote MCP server

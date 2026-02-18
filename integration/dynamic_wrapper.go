@@ -16,6 +16,7 @@ import (
 
 	"mcp-debug/client"
 	"mcp-debug/config"
+	"mcp-debug/dashboard"
 	"mcp-debug/discovery"
 )
 
@@ -25,12 +26,15 @@ type DynamicWrapper struct {
 	proxyServer   *ProxyServer
 	dynamicServers map[string]*DynamicServerInfo
 	mu            sync.RWMutex
-	
+
 	// Recording functionality
 	recordFile     *os.File
 	recordEnabled  bool
 	recordMu       sync.Mutex
 	recordFilename string // Path to the recording file (for metadata)
+
+	// Dashboard web server
+	dashboard *dashboard.Server
 }
 
 type DynamicServerInfo struct {
@@ -77,10 +81,18 @@ func NewDynamicWrapper(cfg *config.ProxyConfig) *DynamicWrapper {
 		proxyServer:    proxyServer,
 		dynamicServers: make(map[string]*DynamicServerInfo),
 	}
-	
+
+	// Create dashboard if enabled
+	if cfg.Dashboard.IsEnabled() {
+		port := cfg.Dashboard.GetPort()
+		wrapper.dashboard = dashboard.NewServer(port)
+		wrapper.dashboard.SetStatusProvider(wrapper)
+		wrapper.dashboard.SetAuthTrigger(wrapper)
+	}
+
 	// Register management tools
 	wrapper.registerManagementTools()
-	
+
 	return wrapper
 }
 
@@ -317,6 +329,9 @@ func (w *DynamicWrapper) handleServerAdd(ctx context.Context, request mcp.CallTo
 		httpClient := client.NewHTTPClient(name, command)
 		httpClient.SetTimeout(serverConfig.GetServerTimeout())
 		mcpClient = httpClient
+
+		// Wire dashboard callback handler
+		w.wireClientCallbackHandler(httpClient)
 	} else {
 		// stdio transport
 		serverConfig = config.ServerConfig{
@@ -402,6 +417,8 @@ func (w *DynamicWrapper) handleServerAdd(ctx context.Context, request mcp.CallTo
 	// Also add to proxy server's client list
 	w.proxyServer.clients = append(w.proxyServer.clients, mcpClient)
 	
+	w.publishEvent(dashboard.EventConnection, name, fmt.Sprintf("Server added with %d tools", registeredCount))
+
 	result := fmt.Sprintf("Added server '%s' with command: %s %s\nRegistered %d tools successfully.",
 		name, serverConfig.Command, strings.Join(serverConfig.Args, " "), registeredCount)
 
@@ -579,7 +596,9 @@ func (w *DynamicWrapper) handleServerDisconnect(ctx context.Context, request mcp
 	serverInfo.IsConnected = false
 	serverInfo.ErrorMessage = "Server disconnected by user"
 	serverInfo.Client = nil
-	
+
+	w.publishEvent(dashboard.EventConnection, name, "Server disconnected")
+
 	result := fmt.Sprintf("Disconnected server '%s'. Tools remain registered but will return errors.\\nUse server_reconnect to restore with new binary/command.", name)
 	toolResult := mcp.NewToolResultText(result)
 	toolResult = w.addRecordingMetadata(toolResult)
@@ -673,6 +692,7 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 				httpClient.SetAuthProvider(authProvider)
 			}
 		}
+		w.wireClientCallbackHandler(httpClient)
 		mcpClient = httpClient
 	default: // stdio
 		stdioClient := client.NewStdioClient(serverConfig.Name, serverConfig.Command, serverConfig.Args)
@@ -778,6 +798,8 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 	serverInfo.IsConnected = true
 	log.Printf("Server '%s' marked as connected", name)
 
+	w.publishEvent(dashboard.EventConnection, name, "Server reconnected")
+
 	// Build result message based on how we reconnected
 	var resultMsg string
 	if commandStr != "" {
@@ -835,6 +857,9 @@ func (w *DynamicWrapper) createDynamicProxyHandler(serverName, originalToolName 
 		for key, value := range args {
 			argsMap[key] = value
 		}
+
+		// Publish tool call event to dashboard
+		w.publishEvent(dashboard.EventToolCall, serverName, fmt.Sprintf("Calling %s", prefixedToolName))
 
 		// Forward the call to the remote server using copied client reference
 		// (safe from concurrent disconnect)
@@ -904,10 +929,22 @@ func isConnectionError(err error) bool {
 
 // Initialize initializes the proxy with static servers
 func (w *DynamicWrapper) Initialize(ctx context.Context) error {
+	// Start dashboard before creating clients (needed for OAuth callback handler)
+	if w.dashboard != nil {
+		if err := w.dashboard.Start(); err != nil {
+			log.Printf("Warning: failed to start dashboard: %v", err)
+			// Non-fatal — continue without dashboard
+			w.dashboard = nil
+		}
+	}
+
 	// Initialize the proxy server with static servers
 	if err := w.proxyServer.Initialize(ctx); err != nil {
 		return err
 	}
+
+	// Wire callback handler to any OAuthProviders on HTTP clients
+	w.wireCallbackHandlers()
 
 	// Populate dynamicServers map with static servers
 	if err := w.populateStaticServers(); err != nil {
@@ -919,6 +956,51 @@ func (w *DynamicWrapper) Initialize(ctx context.Context) error {
 	w.createHandlersForAllTools()
 
 	return nil
+}
+
+// wireCallbackHandlers sets the dashboard callback handler on all OAuthProviders.
+func (w *DynamicWrapper) wireCallbackHandlers() {
+	if w.dashboard == nil {
+		return
+	}
+
+	for _, c := range w.proxyServer.clients {
+		w.wireClientCallbackHandler(c)
+	}
+}
+
+// wireClientCallbackHandler wires dashboard callback handler to a single client's OAuthProvider.
+func (w *DynamicWrapper) wireClientCallbackHandler(c client.MCPClient) {
+	if w.dashboard == nil {
+		return
+	}
+
+	httpClient, ok := c.(*client.HTTPClient)
+	if !ok {
+		return
+	}
+
+	provider := httpClient.GetAuthProvider()
+	if provider == nil {
+		return
+	}
+
+	oauthProvider, ok := provider.(*client.OAuthProvider)
+	if !ok {
+		return
+	}
+
+	oauthProvider.SetCallbackHandler(w.dashboard.Callbacks())
+	oauthProvider.SetServerName(httpClient.ServerName())
+	oauthProvider.SetAuthEventFunc(func(serverName, message string) {
+		if w.dashboard != nil {
+			w.dashboard.Events().Publish(dashboard.Event{
+				Type:    dashboard.EventAuth,
+				Server:  serverName,
+				Message: message,
+			})
+		}
+	})
 }
 
 // populateStaticServers adds static servers from config to dynamicServers map
@@ -1014,8 +1096,131 @@ func (w *DynamicWrapper) createHandlersForAllTools() {
 	}
 }
 
+// GetServerStatuses implements dashboard.ServerStatusProvider.
+func (w *DynamicWrapper) GetServerStatuses() []dashboard.ServerStatus {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	statuses := make([]dashboard.ServerStatus, 0, len(w.dynamicServers))
+	for _, info := range w.dynamicServers {
+		status := dashboard.ServerStatus{
+			Name:      info.Name,
+			Prefix:    info.Config.Prefix,
+			Transport: info.Config.Transport,
+			URL:       info.Config.URL,
+			Connected: info.IsConnected,
+			ToolCount: len(info.Tools),
+			Error:     info.ErrorMessage,
+		}
+
+		// Get auth status for HTTP servers
+		if info.Config.Transport == "http" && info.Client != nil {
+			if httpClient, ok := info.Client.(*client.HTTPClient); ok {
+				if provider := httpClient.GetAuthProvider(); provider != nil {
+					if tsp, ok := provider.(client.TokenStatusProvider); ok {
+						ts := tsp.GetTokenStatus()
+						authType := "oauth"
+						if info.Config.Auth != nil {
+							authType = info.Config.Auth.Type
+						}
+						status.Auth = &dashboard.AuthStatus{
+							Type:            authType,
+							Status:          ts.Status,
+							TokenExpiresMin: ts.ExpiresInMin,
+							Scopes:          ts.Scopes,
+							ClientID:        ts.ClientID,
+						}
+					}
+				}
+			}
+		} else if info.Config.Transport == "http" && info.Config.Auth != nil && info.Config.Auth.Type == "oauth" {
+			// Disconnected HTTP server with OAuth config — show needs_auth
+			status.Auth = &dashboard.AuthStatus{
+				Type:   "oauth",
+				Status: "needs_auth",
+			}
+		}
+
+		statuses = append(statuses, status)
+	}
+
+	return statuses
+}
+
+// TriggerAuth implements dashboard.AuthTrigger — starts an OAuth flow for a server.
+func (w *DynamicWrapper) TriggerAuth(ctx context.Context, serverName string) (string, error) {
+	w.mu.RLock()
+	info, exists := w.dynamicServers[serverName]
+	w.mu.RUnlock()
+
+	if !exists {
+		return "", fmt.Errorf("server '%s' not found", serverName)
+	}
+
+	if info.Config.Transport != "http" {
+		return "", fmt.Errorf("server '%s' uses %s transport, OAuth not applicable", serverName, info.Config.Transport)
+	}
+
+	if info.Client == nil {
+		return "", fmt.Errorf("server '%s' is not connected", serverName)
+	}
+
+	httpClient, ok := info.Client.(*client.HTTPClient)
+	if !ok {
+		return "", fmt.Errorf("server '%s' client is not an HTTP client", serverName)
+	}
+
+	provider := httpClient.GetAuthProvider()
+	if provider == nil {
+		return "", fmt.Errorf("server '%s' has no auth provider", serverName)
+	}
+
+	oauthProvider, ok := provider.(*client.OAuthProvider)
+	if !ok {
+		return "", fmt.Errorf("server '%s' does not use OAuth", serverName)
+	}
+
+	return oauthProvider.InitiateAuthFlow(ctx)
+}
+
+// RevokeAuth implements dashboard.AuthTrigger — removes stored tokens for a server.
+func (w *DynamicWrapper) RevokeAuth(serverName string) error {
+	w.mu.RLock()
+	info, exists := w.dynamicServers[serverName]
+	w.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("server '%s' not found", serverName)
+	}
+
+	if info.Config.Auth != nil && info.Config.Auth.TokenFile != "" {
+		store := client.NewTokenStore(info.Config.Auth.TokenFile)
+		return store.Delete()
+	}
+
+	return fmt.Errorf("server '%s' has no token store configured", serverName)
+}
+
+// publishEvent sends an event to the dashboard event bus if available.
+func (w *DynamicWrapper) publishEvent(eventType dashboard.EventType, serverName, message string) {
+	if w.dashboard != nil {
+		w.dashboard.Events().Publish(dashboard.Event{
+			Type:    eventType,
+			Server:  serverName,
+			Message: message,
+		})
+	}
+}
+
 // Start starts the MCP server
 func (w *DynamicWrapper) Start() error {
 	log.Println("Starting Dynamic MCP Proxy Server with management tools...")
 	return server.ServeStdio(w.baseServer)
+}
+
+// StopDashboard stops the dashboard server if running.
+func (w *DynamicWrapper) StopDashboard() {
+	if w.dashboard != nil {
+		w.dashboard.Stop()
+	}
 }

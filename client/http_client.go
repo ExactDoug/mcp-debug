@@ -201,6 +201,11 @@ func (c *HTTPClient) ServerName() string {
 	return c.serverName
 }
 
+// GetAuthProvider returns the current auth provider (may be nil).
+func (c *HTTPClient) GetAuthProvider() AuthProvider {
+	return c.authProvider
+}
+
 // IsConnected returns true if the client is currently connected.
 func (c *HTTPClient) IsConnected() bool {
 	c.mu.Lock()

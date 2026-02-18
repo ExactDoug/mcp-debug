@@ -41,3 +41,8 @@ Thumbs.db
 # Debug files
 debug
 *.log
+
+# Local MCP and proxy configuration (may contain credentials/local paths)
+config.yaml
+.mcp.json
+mcp-session.jsonl

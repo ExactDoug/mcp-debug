@@ -42,6 +42,13 @@ type OAuthProvider struct {
 
 	token *TokenData
 	mu    sync.Mutex
+
+	// Optional: external callback handler (dashboard). Replaces ephemeral server.
+	callbackHandler CallbackHandler
+	// Optional: server name for event tracking and callback registration.
+	serverName string
+	// Optional: callback for auth events (published to dashboard event bus).
+	onAuthEvent func(serverName, message string)
 }
 
 // OAuthConfig holds configuration for creating an OAuthProvider.
@@ -78,8 +85,6 @@ func NewOAuthProvider(cfg OAuthConfig) *OAuthProvider {
 
 // NewOAuthProviderFromConfig creates an OAuthProvider from config.AuthConfig.
 func NewOAuthProviderFromConfig(auth *config.AuthConfig, serverURL string) (*OAuthProvider, error) {
-	// client_id is optional — dynamic registration will be used if not provided
-
 	return NewOAuthProvider(OAuthConfig{
 		ClientID:     auth.ClientID,
 		ClientSecret: auth.ClientSecret,
@@ -90,8 +95,23 @@ func NewOAuthProviderFromConfig(auth *config.AuthConfig, serverURL string) (*OAu
 	}), nil
 }
 
+// SetCallbackHandler sets an external callback handler (e.g., dashboard).
+// When set, OAuth flows use this instead of starting an ephemeral server.
+func (p *OAuthProvider) SetCallbackHandler(h CallbackHandler) {
+	p.callbackHandler = h
+}
+
+// SetServerName sets the server name for event tracking.
+func (p *OAuthProvider) SetServerName(name string) {
+	p.serverName = name
+}
+
+// SetAuthEventFunc sets a callback for auth events (e.g., dashboard event bus).
+func (p *OAuthProvider) SetAuthEventFunc(fn func(serverName, message string)) {
+	p.onAuthEvent = fn
+}
+
 // ApplyAuth sets the Authorization header with the current access token.
-// If a cached token is available and not expired, it is used directly.
 func (p *OAuthProvider) ApplyAuth(req *http.Request) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -100,7 +120,6 @@ func (p *OAuthProvider) ApplyAuth(req *http.Request) error {
 	if p.token == nil && p.tokenStore != nil {
 		if cached, err := p.tokenStore.Load(); err == nil && cached != nil {
 			p.token = cached
-			// Restore client registration data from cache
 			if p.clientID == "" && cached.ClientID != "" {
 				p.clientID = cached.ClientID
 				p.clientSecret = cached.ClientSecret
@@ -114,25 +133,20 @@ func (p *OAuthProvider) ApplyAuth(req *http.Request) error {
 		return nil
 	}
 
-	// If token is expired but we have a refresh token, try refresh
+	// If token is expired but we have a refresh token, let 401 handler deal with it
 	if p.token != nil && p.token.RefreshToken != "" && p.token.IsExpired() {
-		// Attempt refresh in background — if it fails, we'll try the request
-		// without auth and let the 401 handler deal with it
 		log.Printf("[DEBUG] OAuthProvider: token expired, will be refreshed on 401")
 	}
 
-	// No valid token — the request will go without auth.
-	// The HTTPClient's 401 handler will call RefreshToken.
 	return nil
 }
 
 // RefreshToken handles 401 responses by refreshing or re-obtaining the token.
-// This implements the TokenRefresher interface.
 func (p *OAuthProvider) RefreshToken(ctx context.Context, wwwAuth string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// First try: if we have a refresh token, exchange it
+	// First try: refresh token
 	if p.token != nil && p.token.RefreshToken != "" {
 		log.Printf("[DEBUG] OAuthProvider: attempting token refresh")
 		if err := p.refreshAccessToken(ctx, wwwAuth); err == nil {
@@ -141,9 +155,131 @@ func (p *OAuthProvider) RefreshToken(ctx context.Context, wwwAuth string) error 
 		log.Printf("[DEBUG] OAuthProvider: refresh failed, falling back to full auth flow")
 	}
 
-	// Full OAuth flow: discover auth server, open browser, exchange code
+	// Full OAuth flow
 	return p.fullAuthorizationFlow(ctx, wwwAuth)
 }
+
+// GetTokenStatus returns the current auth status for dashboard display.
+func (p *OAuthProvider) GetTokenStatus() *TokenStatus {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.token == nil && p.tokenStore != nil {
+		if cached, _ := p.tokenStore.Load(); cached != nil {
+			p.token = cached
+		}
+	}
+
+	if p.token == nil {
+		return &TokenStatus{Status: "needs_auth"}
+	}
+
+	if p.token.IsExpired() {
+		if p.token.RefreshToken != "" {
+			return &TokenStatus{Status: "expired", Scopes: p.token.Scopes, ClientID: p.clientID}
+		}
+		return &TokenStatus{Status: "needs_auth", Scopes: p.token.Scopes, ClientID: p.clientID}
+	}
+
+	remaining := time.Until(p.token.ExpiresAt)
+	return &TokenStatus{
+		Status:       "authenticated",
+		ExpiresInMin: int(remaining.Minutes()),
+		Scopes:       p.token.Scopes,
+		ClientID:     p.clientID,
+	}
+}
+
+// InitiateAuthFlow starts an OAuth flow proactively (e.g., from dashboard).
+// Returns the authorization URL. The flow completes asynchronously when
+// the callback is received.
+func (p *OAuthProvider) InitiateAuthFlow(ctx context.Context) (string, error) {
+	p.mu.Lock()
+
+	flow, err := p.prepareOAuthFlow(ctx, "")
+	if err != nil {
+		p.mu.Unlock()
+		return "", err
+	}
+
+	// Register callback
+	var codeCh <-chan string
+	var errCh <-chan error
+	var callbackServer *http.Server
+
+	if p.callbackHandler != nil {
+		_, codeCh, errCh = p.callbackHandler.RegisterPending(flow.state, p.serverName)
+	} else {
+		code := make(chan string, 1)
+		errC := make(chan error, 1)
+		codeCh = code
+		errCh = errC
+		callbackServer = p.startCallbackServer(flow.state, code, errC)
+	}
+
+	p.mu.Unlock()
+
+	if p.onAuthEvent != nil {
+		p.onAuthEvent(p.serverName, "OAuth flow initiated from dashboard")
+	}
+
+	// Complete flow asynchronously
+	go func() {
+		var authCode string
+		select {
+		case authCode = <-codeCh:
+			// Got the code
+		case err := <-errCh:
+			log.Printf("[DEBUG] OAuthProvider: dashboard auth error: %v", err)
+			if p.callbackHandler != nil {
+				p.callbackHandler.UnregisterPending(flow.state)
+			}
+			if callbackServer != nil {
+				shutdownServer(callbackServer)
+			}
+			if p.onAuthEvent != nil {
+				p.onAuthEvent(p.serverName, fmt.Sprintf("Authentication failed: %v", err))
+			}
+			return
+		case <-time.After(5 * time.Minute):
+			log.Printf("[DEBUG] OAuthProvider: dashboard auth timed out")
+			if p.callbackHandler != nil {
+				p.callbackHandler.UnregisterPending(flow.state)
+			}
+			if callbackServer != nil {
+				shutdownServer(callbackServer)
+			}
+			return
+		}
+
+		if p.callbackHandler != nil {
+			p.callbackHandler.UnregisterPending(flow.state)
+		}
+		if callbackServer != nil {
+			shutdownServer(callbackServer)
+		}
+
+		p.mu.Lock()
+		defer p.mu.Unlock()
+
+		if err := p.completeTokenExchange(context.Background(), flow, authCode); err != nil {
+			log.Printf("[DEBUG] OAuthProvider: dashboard auth token exchange failed: %v", err)
+			if p.onAuthEvent != nil {
+				p.onAuthEvent(p.serverName, fmt.Sprintf("Token exchange failed: %v", err))
+			}
+			return
+		}
+
+		log.Printf("[DEBUG] OAuthProvider: dashboard-initiated auth successful")
+		if p.onAuthEvent != nil {
+			p.onAuthEvent(p.serverName, "Authentication successful")
+		}
+	}()
+
+	return flow.authURL, nil
+}
+
+// --- Internal types and methods ---
 
 // authServerMetadata holds discovered authorization server endpoints.
 type authServerMetadata struct {
@@ -158,15 +294,221 @@ type resourceMetadata struct {
 	Resource             string   `json:"resource"`
 }
 
+// oauthFlowState holds the prepared state for an OAuth flow.
+type oauthFlowState struct {
+	asMeta       *authServerMetadata
+	codeVerifier string
+	state        string
+	redirectURI  string
+	authURL      string
+}
+
+// prepareOAuthFlow does discovery, registration, PKCE setup, and builds the auth URL.
+// Must be called with p.mu held.
+func (p *OAuthProvider) prepareOAuthFlow(ctx context.Context, wwwAuth string) (*oauthFlowState, error) {
+	// Discover authorization server
+	asMeta, err := p.discoverAuthServer(ctx, wwwAuth)
+	if err != nil {
+		return nil, fmt.Errorf("auth server discovery failed: %w", err)
+	}
+
+	// Dynamic client registration if no client_id configured
+	if p.clientID == "" {
+		if p.tokenStore != nil {
+			if cached, err := p.tokenStore.Load(); err == nil && cached != nil && cached.ClientID != "" {
+				log.Printf("[DEBUG] OAuthProvider: using cached client registration")
+				p.clientID = cached.ClientID
+				p.clientSecret = cached.ClientSecret
+			}
+		}
+
+		if p.clientID == "" && asMeta.RegistrationEndpoint != "" {
+			log.Printf("[DEBUG] OAuthProvider: performing dynamic client registration at %s", asMeta.RegistrationEndpoint)
+			clientID, clientSecret, err := p.registerClient(ctx, asMeta.RegistrationEndpoint)
+			if err != nil {
+				return nil, fmt.Errorf("dynamic client registration failed: %w", err)
+			}
+			p.clientID = clientID
+			p.clientSecret = clientSecret
+			log.Printf("[DEBUG] OAuthProvider: registered as client %s", clientID)
+		}
+
+		if p.clientID == "" {
+			return nil, fmt.Errorf("no client_id configured and server does not support dynamic registration")
+		}
+	}
+
+	// Generate PKCE parameters
+	codeVerifier, err := generateCodeVerifier()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate PKCE verifier: %w", err)
+	}
+	codeChallenge := generateCodeChallenge(codeVerifier)
+
+	// Generate state parameter for CSRF protection
+	state, err := generateRandomString(32)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate state: %w", err)
+	}
+
+	redirectURI := fmt.Sprintf("http://localhost:%d/callback", p.redirectPort)
+	authURL := buildAuthorizationURL(asMeta.AuthorizationEndpoint, p.clientID, redirectURI, p.scopes, state, codeChallenge)
+
+	return &oauthFlowState{
+		asMeta:       asMeta,
+		codeVerifier: codeVerifier,
+		state:        state,
+		redirectURI:  redirectURI,
+		authURL:      authURL,
+	}, nil
+}
+
+// completeTokenExchange exchanges the auth code for tokens and stores them.
+// Must be called with p.mu held.
+func (p *OAuthProvider) completeTokenExchange(ctx context.Context, flow *oauthFlowState, authCode string) error {
+	log.Printf("[DEBUG] OAuthProvider: exchanging authorization code for tokens")
+	tokenData, err := p.exchangeCode(ctx, flow.asMeta.TokenEndpoint, authCode, flow.codeVerifier, flow.redirectURI)
+	if err != nil {
+		return fmt.Errorf("token exchange failed: %w", err)
+	}
+
+	p.token = tokenData
+	p.token.ClientID = p.clientID
+	p.token.ClientSecret = p.clientSecret
+	if p.tokenStore != nil {
+		if err := p.tokenStore.Save(p.token); err != nil {
+			log.Printf("[DEBUG] OAuthProvider: failed to save token: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// fullAuthorizationFlow performs the complete PKCE authorization code flow.
+// Called with p.mu held (from RefreshToken).
+func (p *OAuthProvider) fullAuthorizationFlow(ctx context.Context, wwwAuth string) error {
+	flow, err := p.prepareOAuthFlow(ctx, wwwAuth)
+	if err != nil {
+		return err
+	}
+
+	// Register callback with external handler or start ephemeral server
+	var codeCh <-chan string
+	var errCh <-chan error
+	var callbackServer *http.Server
+
+	if p.callbackHandler != nil {
+		_, codeCh, errCh = p.callbackHandler.RegisterPending(flow.state, p.serverName)
+	} else {
+		code := make(chan string, 1)
+		errC := make(chan error, 1)
+		codeCh = code
+		errCh = errC
+		callbackServer = p.startCallbackServer(flow.state, code, errC)
+	}
+
+	// Open browser
+	log.Printf("[DEBUG] OAuthProvider: opening browser for authorization")
+	fmt.Fprintf(log.Writer(), "\n=== MCP OAuth Authentication ===\n")
+	fmt.Fprintf(log.Writer(), "Opening browser for authentication...\n")
+	fmt.Fprintf(log.Writer(), "If the browser doesn't open, visit:\n%s\n", flow.authURL)
+	fmt.Fprintf(log.Writer(), "Dashboard: http://localhost:%d\n", p.redirectPort)
+	fmt.Fprintf(log.Writer(), "================================\n\n")
+
+	if err := openBrowser(flow.authURL); err != nil {
+		log.Printf("[DEBUG] OAuthProvider: failed to open browser: %v", err)
+	}
+
+	if p.onAuthEvent != nil {
+		p.onAuthEvent(p.serverName, "Opening browser for authentication")
+	}
+
+	// Wait for callback with timeout
+	var authCode string
+	select {
+	case authCode = <-codeCh:
+		// Got the code
+	case err := <-errCh:
+		p.cleanupFlow(flow.state, callbackServer)
+		return fmt.Errorf("callback error: %w", err)
+	case <-ctx.Done():
+		p.cleanupFlow(flow.state, callbackServer)
+		return fmt.Errorf("authorization timed out: %w", ctx.Err())
+	case <-time.After(5 * time.Minute):
+		p.cleanupFlow(flow.state, callbackServer)
+		return fmt.Errorf("authorization timed out after 5 minutes")
+	}
+
+	p.cleanupFlow(flow.state, callbackServer)
+
+	if err := p.completeTokenExchange(ctx, flow, authCode); err != nil {
+		return err
+	}
+
+	log.Printf("[DEBUG] OAuthProvider: authentication successful")
+	if p.onAuthEvent != nil {
+		p.onAuthEvent(p.serverName, "Authentication successful")
+	}
+	return nil
+}
+
+// cleanupFlow cleans up after an OAuth flow (unregisters callback or shuts down server).
+func (p *OAuthProvider) cleanupFlow(state string, callbackServer *http.Server) {
+	if p.callbackHandler != nil {
+		p.callbackHandler.UnregisterPending(state)
+	}
+	if callbackServer != nil {
+		shutdownServer(callbackServer)
+	}
+}
+
+// refreshAccessToken uses the refresh token to get a new access token.
+func (p *OAuthProvider) refreshAccessToken(ctx context.Context, wwwAuth string) error {
+	asMeta, err := p.discoverAuthServer(ctx, wwwAuth)
+	if err != nil {
+		return fmt.Errorf("auth server discovery for refresh failed: %w", err)
+	}
+
+	data := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {p.token.RefreshToken},
+		"client_id":     {p.clientID},
+	}
+	if p.clientSecret != "" {
+		data.Set("client_secret", p.clientSecret)
+	}
+
+	tokenData, err := p.doTokenRequest(ctx, asMeta.TokenEndpoint, data)
+	if err != nil {
+		return err
+	}
+
+	// Preserve refresh token if new one wasn't issued
+	if tokenData.RefreshToken == "" && p.token != nil {
+		tokenData.RefreshToken = p.token.RefreshToken
+	}
+
+	p.token = tokenData
+	if p.tokenStore != nil {
+		if err := p.tokenStore.Save(tokenData); err != nil {
+			log.Printf("[DEBUG] OAuthProvider: failed to save refreshed token: %v", err)
+		}
+	}
+
+	log.Printf("[DEBUG] OAuthProvider: token refresh successful")
+	if p.onAuthEvent != nil {
+		p.onAuthEvent(p.serverName, "Token refreshed successfully")
+	}
+	return nil
+}
+
+// --- Discovery, registration, and token exchange ---
+
 // discoverAuthServer discovers the authorization server from the MCP server.
-// Follows the MCP spec: parse WWW-Authenticate → fetch resource metadata → fetch auth server metadata.
 func (p *OAuthProvider) discoverAuthServer(ctx context.Context, wwwAuth string) (*authServerMetadata, error) {
-	// Parse resource_metadata URL from WWW-Authenticate header
-	// Format: Bearer resource_metadata="https://..."
 	resourceMetadataURL := parseResourceMetadataURL(wwwAuth)
 
 	if resourceMetadataURL == "" {
-		// Fall back to well-known endpoint on the MCP server
 		serverBase, err := getBaseURL(p.serverURL)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse server URL: %w", err)
@@ -174,7 +516,6 @@ func (p *OAuthProvider) discoverAuthServer(ctx context.Context, wwwAuth string) 
 		resourceMetadataURL = serverBase + "/.well-known/oauth-protected-resource"
 	}
 
-	// Fetch protected resource metadata
 	log.Printf("[DEBUG] OAuthProvider: fetching resource metadata from %s", resourceMetadataURL)
 	resMeta, err := fetchJSON[resourceMetadata](ctx, resourceMetadataURL)
 	if err != nil {
@@ -185,14 +526,12 @@ func (p *OAuthProvider) discoverAuthServer(ctx context.Context, wwwAuth string) 
 		return nil, fmt.Errorf("resource metadata has no authorization_servers")
 	}
 
-	// Fetch authorization server metadata
 	authServerURL := strings.TrimRight(resMeta.AuthorizationServers[0], "/")
 	asMetadataURL := authServerURL + "/.well-known/openid-configuration"
 
 	log.Printf("[DEBUG] OAuthProvider: fetching auth server metadata from %s", asMetadataURL)
 	asMeta, err := fetchJSON[authServerMetadata](ctx, asMetadataURL)
 	if err != nil {
-		// Try OAuth authorization server metadata (RFC 8414) as fallback
 		asMetadataURL = authServerURL + "/.well-known/oauth-authorization-server"
 		log.Printf("[DEBUG] OAuthProvider: trying RFC 8414 metadata from %s", asMetadataURL)
 		asMeta, err = fetchJSON[authServerMetadata](ctx, asMetadataURL)
@@ -209,9 +548,7 @@ func (p *OAuthProvider) discoverAuthServer(ctx context.Context, wwwAuth string) 
 }
 
 // registerClient performs RFC 7591 Dynamic Client Registration.
-// Returns client_id and client_secret from the registration response.
 func (p *OAuthProvider) registerClient(ctx context.Context, registrationEndpoint string) (clientID, clientSecret string, err error) {
-	// Build registration request
 	regData := map[string]interface{}{
 		"client_name":                "mcp-debug",
 		"redirect_uris":             []string{fmt.Sprintf("http://localhost:%d/callback", p.redirectPort)},
@@ -261,154 +598,6 @@ func (p *OAuthProvider) registerClient(ctx context.Context, registrationEndpoint
 	}
 
 	return regResp.ClientID, regResp.ClientSecret, nil
-}
-
-// fullAuthorizationFlow performs the complete PKCE authorization code flow.
-func (p *OAuthProvider) fullAuthorizationFlow(ctx context.Context, wwwAuth string) error {
-	// Discover authorization server
-	asMeta, err := p.discoverAuthServer(ctx, wwwAuth)
-	if err != nil {
-		return fmt.Errorf("auth server discovery failed: %w", err)
-	}
-
-	// Dynamic client registration if no client_id configured
-	if p.clientID == "" {
-		// Check if we have cached registration from token store
-		if p.tokenStore != nil {
-			if cached, err := p.tokenStore.Load(); err == nil && cached != nil && cached.ClientID != "" {
-				log.Printf("[DEBUG] OAuthProvider: using cached client registration")
-				p.clientID = cached.ClientID
-				p.clientSecret = cached.ClientSecret
-			}
-		}
-
-		// Register if still no client_id
-		if p.clientID == "" && asMeta.RegistrationEndpoint != "" {
-			log.Printf("[DEBUG] OAuthProvider: performing dynamic client registration at %s", asMeta.RegistrationEndpoint)
-			clientID, clientSecret, err := p.registerClient(ctx, asMeta.RegistrationEndpoint)
-			if err != nil {
-				return fmt.Errorf("dynamic client registration failed: %w", err)
-			}
-			p.clientID = clientID
-			p.clientSecret = clientSecret
-			log.Printf("[DEBUG] OAuthProvider: registered as client %s", clientID)
-		}
-
-		if p.clientID == "" {
-			return fmt.Errorf("no client_id configured and server does not support dynamic registration")
-		}
-	}
-
-	// Generate PKCE parameters
-	codeVerifier, err := generateCodeVerifier()
-	if err != nil {
-		return fmt.Errorf("failed to generate PKCE verifier: %w", err)
-	}
-	codeChallenge := generateCodeChallenge(codeVerifier)
-
-	// Generate state parameter for CSRF protection
-	state, err := generateRandomString(32)
-	if err != nil {
-		return fmt.Errorf("failed to generate state: %w", err)
-	}
-
-	redirectURI := fmt.Sprintf("http://localhost:%d/callback", p.redirectPort)
-
-	// Start local callback server
-	codeCh := make(chan string, 1)
-	errCh := make(chan error, 1)
-	server := p.startCallbackServer(state, codeCh, errCh)
-
-	// Build authorization URL
-	authURL := buildAuthorizationURL(asMeta.AuthorizationEndpoint, p.clientID, redirectURI, p.scopes, state, codeChallenge)
-
-	// Open browser
-	log.Printf("[DEBUG] OAuthProvider: opening browser for authorization")
-	fmt.Fprintf(log.Writer(), "\n=== MCP OAuth Authentication ===\n")
-	fmt.Fprintf(log.Writer(), "Opening browser for authentication...\n")
-	fmt.Fprintf(log.Writer(), "If the browser doesn't open, visit:\n%s\n", authURL)
-	fmt.Fprintf(log.Writer(), "================================\n\n")
-
-	if err := openBrowser(authURL); err != nil {
-		log.Printf("[DEBUG] OAuthProvider: failed to open browser: %v", err)
-	}
-
-	// Wait for callback with timeout
-	var authCode string
-	select {
-	case authCode = <-codeCh:
-		// Got the code
-	case err := <-errCh:
-		shutdownServer(server)
-		return fmt.Errorf("callback error: %w", err)
-	case <-ctx.Done():
-		shutdownServer(server)
-		return fmt.Errorf("authorization timed out: %w", ctx.Err())
-	case <-time.After(5 * time.Minute):
-		shutdownServer(server)
-		return fmt.Errorf("authorization timed out after 5 minutes")
-	}
-
-	shutdownServer(server)
-
-	// Exchange code for tokens
-	log.Printf("[DEBUG] OAuthProvider: exchanging authorization code for tokens")
-	tokenData, err := p.exchangeCode(ctx, asMeta.TokenEndpoint, authCode, codeVerifier, redirectURI)
-	if err != nil {
-		return fmt.Errorf("token exchange failed: %w", err)
-	}
-
-	// Store token (include client registration data for persistence)
-	p.token = tokenData
-	p.token.ClientID = p.clientID
-	p.token.ClientSecret = p.clientSecret
-	if p.tokenStore != nil {
-		if err := p.tokenStore.Save(p.token); err != nil {
-			log.Printf("[DEBUG] OAuthProvider: failed to save token: %v", err)
-		}
-	}
-
-	log.Printf("[DEBUG] OAuthProvider: authentication successful")
-	return nil
-}
-
-// refreshAccessToken uses the refresh token to get a new access token.
-func (p *OAuthProvider) refreshAccessToken(ctx context.Context, wwwAuth string) error {
-	// Discover auth server to get token endpoint
-	asMeta, err := p.discoverAuthServer(ctx, wwwAuth)
-	if err != nil {
-		return fmt.Errorf("auth server discovery for refresh failed: %w", err)
-	}
-
-	// Build refresh request
-	data := url.Values{
-		"grant_type":    {"refresh_token"},
-		"refresh_token": {p.token.RefreshToken},
-		"client_id":     {p.clientID},
-	}
-	if p.clientSecret != "" {
-		data.Set("client_secret", p.clientSecret)
-	}
-
-	tokenData, err := p.doTokenRequest(ctx, asMeta.TokenEndpoint, data)
-	if err != nil {
-		return err
-	}
-
-	// Preserve refresh token if new one wasn't issued
-	if tokenData.RefreshToken == "" && p.token != nil {
-		tokenData.RefreshToken = p.token.RefreshToken
-	}
-
-	p.token = tokenData
-	if p.tokenStore != nil {
-		if err := p.tokenStore.Save(tokenData); err != nil {
-			log.Printf("[DEBUG] OAuthProvider: failed to save refreshed token: %v", err)
-		}
-	}
-
-	log.Printf("[DEBUG] OAuthProvider: token refresh successful")
-	return nil
 }
 
 // exchangeCode exchanges an authorization code for tokens.
@@ -481,10 +670,10 @@ func (p *OAuthProvider) doTokenRequest(ctx context.Context, tokenEndpoint string
 }
 
 // startCallbackServer starts a local HTTP server to receive the OAuth callback.
+// Used as fallback when no external CallbackHandler is set.
 func (p *OAuthProvider) startCallbackServer(expectedState string, codeCh chan<- string, errCh chan<- error) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-		// Check state
 		state := r.URL.Query().Get("state")
 		if state != expectedState {
 			errCh <- fmt.Errorf("state mismatch: expected %s, got %s", expectedState, state)
@@ -492,7 +681,6 @@ func (p *OAuthProvider) startCallbackServer(expectedState string, codeCh chan<- 
 			return
 		}
 
-		// Check for error
 		if errMsg := r.URL.Query().Get("error"); errMsg != "" {
 			desc := r.URL.Query().Get("error_description")
 			errCh <- fmt.Errorf("OAuth error: %s - %s", errMsg, desc)
@@ -500,7 +688,6 @@ func (p *OAuthProvider) startCallbackServer(expectedState string, codeCh chan<- 
 			return
 		}
 
-		// Extract authorization code
 		code := r.URL.Query().Get("code")
 		if code == "" {
 			errCh <- fmt.Errorf("no authorization code in callback")
@@ -517,7 +704,6 @@ func (p *OAuthProvider) startCallbackServer(expectedState string, codeCh chan<- 
 		Handler: mux,
 	}
 
-	// Start listener
 	listener, err := net.Listen("tcp", server.Addr)
 	if err != nil {
 		errCh <- fmt.Errorf("failed to start callback server on port %d: %w", p.redirectPort, err)
@@ -535,14 +721,11 @@ func (p *OAuthProvider) startCallbackServer(expectedState string, codeCh chan<- 
 
 // --- Helper functions ---
 
-// parseResourceMetadataURL extracts the resource_metadata URL from a WWW-Authenticate header.
-// Format: Bearer resource_metadata="https://..."
 func parseResourceMetadataURL(wwwAuth string) string {
 	if wwwAuth == "" {
 		return ""
 	}
 
-	// Look for resource_metadata="<url>"
 	const key = `resource_metadata="`
 	idx := strings.Index(wwwAuth, key)
 	if idx == -1 {
@@ -558,7 +741,6 @@ func parseResourceMetadataURL(wwwAuth string) string {
 	return rest[:endIdx]
 }
 
-// getBaseURL extracts the base URL (scheme + host) from a full URL.
 func getBaseURL(fullURL string) (string, error) {
 	u, err := url.Parse(fullURL)
 	if err != nil {
@@ -567,7 +749,6 @@ func getBaseURL(fullURL string) (string, error) {
 	return fmt.Sprintf("%s://%s", u.Scheme, u.Host), nil
 }
 
-// fetchJSON fetches a URL and decodes the JSON response.
 func fetchJSON[T any](ctx context.Context, url string) (*T, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -594,7 +775,6 @@ func fetchJSON[T any](ctx context.Context, url string) (*T, error) {
 	return &result, nil
 }
 
-// generateCodeVerifier generates a PKCE code verifier (43-128 chars, base64url).
 func generateCodeVerifier() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
@@ -603,13 +783,11 @@ func generateCodeVerifier() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// generateCodeChallenge generates a PKCE S256 code challenge from a verifier.
 func generateCodeChallenge(verifier string) string {
 	h := sha256.Sum256([]byte(verifier))
 	return base64.RawURLEncoding.EncodeToString(h[:])
 }
 
-// generateRandomString generates a random base64url string of the given byte length.
 func generateRandomString(n int) (string, error) {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
@@ -618,7 +796,6 @@ func generateRandomString(n int) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// buildAuthorizationURL constructs the OAuth authorization URL with all required parameters.
 func buildAuthorizationURL(endpoint, clientID, redirectURI, scopes, state, codeChallenge string) string {
 	params := url.Values{
 		"response_type":         {"code"},
@@ -634,16 +811,13 @@ func buildAuthorizationURL(endpoint, clientID, redirectURI, scopes, state, codeC
 	return endpoint + "?" + params.Encode()
 }
 
-// openBrowser opens the given URL in the system default browser.
 func openBrowser(url string) error {
 	var cmd string
 	var args []string
 
 	switch runtime.GOOS {
 	case "linux":
-		// Check if running in WSL
 		if isWSL() {
-			// Use PowerShell to open URL — cmd.exe /c start breaks on & in URLs
 			cmd = "powershell.exe"
 			args = []string{"-NoProfile", "-Command", fmt.Sprintf("Start-Process '%s'", url)}
 		} else {
@@ -663,13 +837,11 @@ func openBrowser(url string) error {
 	return exec.Command(cmd, args...).Start()
 }
 
-// isWSL checks if running inside Windows Subsystem for Linux.
 func isWSL() bool {
 	_, err := exec.LookPath("cmd.exe")
 	return err == nil
 }
 
-// shutdownServer gracefully shuts down an HTTP server.
 func shutdownServer(server *http.Server) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>mcp-debug Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f8f9fa; color: #202124; line-height: 1.5; }
+        .container { max-width: 900px; margin: 0 auto; padding: 24px 16px; }
+        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+        h1 { font-size: 1.5rem; font-weight: 500; }
+
+        .status-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+        .status-dot.connected { background: #34a853; }
+        .status-dot.disconnected { background: #ea4335; }
+        .status-dot.pending { background: #fbbc04; }
+
+        .card { background: #fff; border-radius: 8px; border: 1px solid #dadce0; margin-bottom: 16px; padding: 16px; }
+        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+        .card-header h2 { font-size: 1.1rem; font-weight: 500; }
+
+        .server { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #f1f3f4; }
+        .server:last-child { border-bottom: none; }
+        .server-info { flex: 1; }
+        .server-name { font-weight: 500; font-size: 0.95rem; }
+        .server-meta { font-size: 0.8rem; color: #5f6368; margin-top: 2px; }
+
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: 500; margin-left: 6px; }
+        .badge-connected { background: #e6f4ea; color: #137333; }
+        .badge-disconnected { background: #fce8e6; color: #c5221f; }
+        .badge-auth { background: #e8f0fe; color: #1967d2; }
+        .badge-expired { background: #fef7e0; color: #ea8600; }
+        .badge-needs-auth { background: #fce8e6; color: #c5221f; }
+
+        .btn { display: inline-block; padding: 6px 16px; border-radius: 4px; font-size: 0.85rem; border: none; cursor: pointer; font-weight: 500; }
+        .btn-primary { background: #1a73e8; color: #fff; }
+        .btn-primary:hover { background: #1765cc; }
+        .btn-danger { background: #d93025; color: #fff; }
+        .btn-danger:hover { background: #c12b20; }
+        .btn-small { padding: 4px 12px; font-size: 0.8rem; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .event-feed { max-height: 300px; overflow-y: auto; font-family: 'SF Mono', Monaco, Consolas, monospace; font-size: 0.8rem; }
+        .event { padding: 4px 8px; border-bottom: 1px solid #f1f3f4; }
+        .event-time { color: #5f6368; margin-right: 8px; }
+        .event-type { font-weight: 500; margin-right: 8px; }
+        .event-type.tool_call { color: #1967d2; }
+        .event-type.auth { color: #ea8600; }
+        .event-type.connection { color: #137333; }
+        .event-type.error { color: #c5221f; }
+
+        .empty { text-align: center; padding: 32px; color: #5f6368; }
+
+        .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid #dadce0; border-top-color: #1a73e8; border-radius: 50%; animation: spin 0.6s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>mcp-debug Dashboard</h1>
+            <span id="sse-status"><span class="status-dot pending"></span> Connecting...</span>
+        </header>
+
+        <div class="card">
+            <div class="card-header">
+                <h2>Upstream Servers</h2>
+                <button class="btn btn-small btn-primary" onclick="refreshServers()">Refresh</button>
+            </div>
+            <div id="server-list">
+                <div class="empty"><span class="spinner"></span> Loading servers...</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h2>Live Events</h2>
+                <button class="btn btn-small" onclick="clearEvents()">Clear</button>
+            </div>
+            <div id="event-feed" class="event-feed">
+                <div class="empty">Waiting for events...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        var servers = [];
+        var eventSource = null;
+
+        function $(id) { return document.getElementById(id); }
+
+        function esc(s) {
+            if (!s) return '';
+            var d = document.createElement('div');
+            d.textContent = s;
+            return d.innerHTML;
+        }
+
+        function timeStr(d) {
+            try { return new Date(d).toLocaleTimeString(); }
+            catch(e) { return ''; }
+        }
+
+        function fetchJSON(url, opts) {
+            return fetch(url, opts).then(function(res) {
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                return res.json();
+            });
+        }
+
+        function refreshServers() {
+            fetchJSON('/api/servers').then(function(data) {
+                servers = data.servers || [];
+                renderServers();
+            }).catch(function(err) {
+                console.error('Failed to fetch servers:', err);
+            });
+        }
+
+        function renderServers() {
+            var el = $('server-list');
+            if (servers.length === 0) {
+                el.innerHTML = '<div class="empty">No upstream servers configured</div>';
+                return;
+            }
+
+            el.innerHTML = servers.map(function(s) {
+                var connBadge = s.connected
+                    ? '<span class="badge badge-connected">Connected</span>'
+                    : '<span class="badge badge-disconnected">Disconnected</span>';
+
+                var authBadge = '';
+                var authBtn = '';
+
+                if (s.auth) {
+                    switch (s.auth.status) {
+                        case 'authenticated':
+                            var expiry = s.auth.token_expires_in_minutes ? ' (' + s.auth.token_expires_in_minutes + 'min)' : '';
+                            authBadge = '<span class="badge badge-auth">Authenticated' + expiry + '</span>';
+                            authBtn = '<button class="btn btn-small btn-danger" onclick="revokeAuth(\'' + esc(s.name) + '\')">Revoke</button>';
+                            break;
+                        case 'expired':
+                            authBadge = '<span class="badge badge-expired">Token Expired</span>';
+                            authBtn = '<button class="btn btn-small btn-primary" onclick="startAuth(\'' + esc(s.name) + '\')">Re-authenticate</button>';
+                            break;
+                        case 'needs_auth':
+                            authBadge = '<span class="badge badge-needs-auth">Needs Auth</span>';
+                            authBtn = '<button class="btn btn-small btn-primary" onclick="startAuth(\'' + esc(s.name) + '\')">Authenticate</button>';
+                            break;
+                    }
+                }
+
+                var meta = [s.transport];
+                if (s.url) meta.push(s.url);
+                if (s.tools) meta.push(s.tools + ' tools');
+                if (s.error) meta.push('Error: ' + s.error);
+
+                return '<div class="server">' +
+                    '<div class="server-info">' +
+                        '<div class="server-name">' + esc(s.name) + ' ' + connBadge + ' ' + authBadge + '</div>' +
+                        '<div class="server-meta">' + esc(meta.join(' \u00b7 ')) + '</div>' +
+                    '</div>' +
+                    '<div>' + authBtn + '</div>' +
+                '</div>';
+            }).join('');
+        }
+
+        function startAuth(serverName) {
+            fetchJSON('/api/auth/' + encodeURIComponent(serverName), {
+                method: 'POST',
+                headers: { 'X-Requested-With': 'mcp-debug' }
+            }).then(function(data) {
+                if (data.auth_url) {
+                    window.open(data.auth_url, '_blank');
+                }
+            }).catch(function(err) {
+                console.error('Failed to start auth:', err);
+                addEvent({ type: 'error', message: 'Auth failed for ' + serverName + ': ' + err.message, timestamp: new Date().toISOString() });
+            });
+        }
+
+        function revokeAuth(serverName) {
+            if (!confirm('Revoke authentication for "' + serverName + '"?')) return;
+            fetchJSON('/api/auth/' + encodeURIComponent(serverName), {
+                method: 'DELETE',
+                headers: { 'X-Requested-With': 'mcp-debug' }
+            }).then(function() {
+                refreshServers();
+            }).catch(function(err) {
+                console.error('Failed to revoke auth:', err);
+            });
+        }
+
+        function connectSSE() {
+            if (eventSource) eventSource.close();
+            eventSource = new EventSource('/api/events');
+
+            eventSource.onopen = function() {
+                $('sse-status').innerHTML = '<span class="status-dot connected"></span> Connected';
+            };
+
+            eventSource.onmessage = function(e) {
+                try {
+                    var event = JSON.parse(e.data);
+                    if (event.type === 'connected') return;
+                    addEvent(event);
+                    if (event.type === 'auth' || event.type === 'connection') {
+                        setTimeout(refreshServers, 500);
+                    }
+                } catch(err) {
+                    console.error('Failed to parse event:', err);
+                }
+            };
+
+            eventSource.onerror = function() {
+                $('sse-status').innerHTML = '<span class="status-dot disconnected"></span> Disconnected';
+                setTimeout(connectSSE, 3000);
+            };
+        }
+
+        function addEvent(event) {
+            var feed = $('event-feed');
+            if (feed.querySelector('.empty')) feed.innerHTML = '';
+
+            var div = document.createElement('div');
+            div.className = 'event';
+            div.innerHTML =
+                '<span class="event-time">' + timeStr(event.timestamp || new Date()) + '</span>' +
+                '<span class="event-type ' + (event.type || '') + '">' + esc(event.type || 'info') + '</span>' +
+                (event.server ? '<strong>' + esc(event.server) + '</strong> ' : '') +
+                esc(event.message || '');
+            feed.insertBefore(div, feed.firstChild);
+
+            while (feed.children.length > 200) {
+                feed.removeChild(feed.lastChild);
+            }
+        }
+
+        function clearEvents() {
+            $('event-feed').innerHTML = '<div class="empty">Waiting for events...</div>';
+        }
+
+        refreshServers();
+        connectSSE();
+        setInterval(refreshServers, 15000);
+    </script>
+</body>
+</html>
