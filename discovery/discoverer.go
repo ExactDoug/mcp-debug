@@ -148,7 +148,11 @@ func (d *Discoverer) createHTTPClient(serverConfig config.ServerConfig) (client.
 	httpClient := client.NewHTTPClient(serverConfig.Name, serverConfig.URL)
 	httpClient.SetTimeout(serverConfig.GetServerTimeout())
 
-	// Set auth provider if configured
+	// Set auth provider if configured.
+	// Discovery only uses cached tokens — no interactive OAuth flows.
+	// If the server returns 401 and there's no cached token, discovery
+	// fails gracefully and the dashboard shows "Needs Auth" for the user
+	// to authenticate proactively.
 	if serverConfig.Auth != nil {
 		authProvider, err := client.NewAuthProviderFromConfigWithURL(serverConfig.Auth, serverConfig.URL)
 		if err != nil {

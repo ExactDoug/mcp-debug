@@ -938,12 +938,26 @@ func (w *DynamicWrapper) Initialize(ctx context.Context) error {
 		}
 	}
 
+	// Wire callback handler to proxy server BEFORE Initialize so OAuthProviders
+	// have the dashboard callback handler before they attempt to connect.
+	// This prevents the port conflict where the ephemeral callback server tries
+	// to bind the same port the dashboard is already using.
+	if w.dashboard != nil {
+		w.proxyServer.SetCallbackHandler(w.dashboard.Callbacks(), func(serverName, message string) {
+			w.dashboard.Events().Publish(dashboard.Event{
+				Type:    dashboard.EventAuth,
+				Server:  serverName,
+				Message: message,
+			})
+		})
+	}
+
 	// Initialize the proxy server with static servers
 	if err := w.proxyServer.Initialize(ctx); err != nil {
 		return err
 	}
 
-	// Wire callback handler to any OAuthProviders on HTTP clients
+	// Wire any remaining callback handlers (e.g., for dynamically added servers)
 	w.wireCallbackHandlers()
 
 	// Populate dynamicServers map with static servers
@@ -1134,10 +1148,27 @@ func (w *DynamicWrapper) GetServerStatuses() []dashboard.ServerStatus {
 				}
 			}
 		} else if info.Config.Transport == "http" && info.Config.Auth != nil && info.Config.Auth.Type == "oauth" {
-			// Disconnected HTTP server with OAuth config — show needs_auth
+			// Disconnected HTTP server with OAuth config — check token store
+			authStatus := "needs_auth"
+			var expiresMin int
+			if info.Config.Auth.TokenFile != "" {
+				store := client.NewTokenStore(info.Config.Auth.TokenFile)
+				if token, err := store.Load(); err == nil && token != nil {
+					if token.IsExpired() {
+						authStatus = "expired"
+					} else {
+						authStatus = "authenticated"
+						if !token.ExpiresAt.IsZero() {
+							remaining := time.Until(token.ExpiresAt)
+							expiresMin = int(remaining.Minutes())
+						}
+					}
+				}
+			}
 			status.Auth = &dashboard.AuthStatus{
-				Type:   "oauth",
-				Status: "needs_auth",
+				Type:            "oauth",
+				Status:          authStatus,
+				TokenExpiresMin: expiresMin,
 			}
 		}
 
@@ -1161,26 +1192,164 @@ func (w *DynamicWrapper) TriggerAuth(ctx context.Context, serverName string) (st
 		return "", fmt.Errorf("server '%s' uses %s transport, OAuth not applicable", serverName, info.Config.Transport)
 	}
 
-	if info.Client == nil {
-		return "", fmt.Errorf("server '%s' is not connected", serverName)
-	}
-
-	httpClient, ok := info.Client.(*client.HTTPClient)
-	if !ok {
-		return "", fmt.Errorf("server '%s' client is not an HTTP client", serverName)
-	}
-
-	provider := httpClient.GetAuthProvider()
-	if provider == nil {
-		return "", fmt.Errorf("server '%s' has no auth provider", serverName)
-	}
-
-	oauthProvider, ok := provider.(*client.OAuthProvider)
-	if !ok {
+	if info.Config.Auth == nil || info.Config.Auth.Type != "oauth" {
 		return "", fmt.Errorf("server '%s' does not use OAuth", serverName)
 	}
 
+	// If the server has a connected client with an OAuthProvider, use it directly
+	if info.Client != nil {
+		if httpClient, ok := info.Client.(*client.HTTPClient); ok {
+			if provider := httpClient.GetAuthProvider(); provider != nil {
+				if oauthProvider, ok := provider.(*client.OAuthProvider); ok {
+					return oauthProvider.InitiateAuthFlow(ctx)
+				}
+			}
+		}
+	}
+
+	// Server is disconnected (e.g., discovery failed due to no token).
+	// Create a standalone OAuthProvider from config to perform the auth flow.
+	// Once tokens are stored, server_reconnect will pick them up.
+	oauthProvider, err := client.NewOAuthProviderFromConfig(info.Config.Auth, info.Config.URL)
+	if err != nil {
+		return "", fmt.Errorf("failed to create auth provider for '%s': %w", serverName, err)
+	}
+
+	// Wire callback handler, events, and auto-reconnect
+	if w.dashboard != nil {
+		oauthProvider.SetCallbackHandler(w.dashboard.Callbacks())
+		oauthProvider.SetServerName(serverName)
+		oauthProvider.SetAuthEventFunc(func(sn, message string) {
+			w.dashboard.Events().Publish(dashboard.Event{
+				Type:    dashboard.EventAuth,
+				Server:  sn,
+				Message: message,
+			})
+		})
+	}
+
+	// After successful auth, auto-reconnect the server
+	oauthProvider.SetAuthSuccessFunc(func() {
+		go w.reconnectAfterAuth(serverName)
+	})
+
 	return oauthProvider.InitiateAuthFlow(ctx)
+}
+
+// reconnectAfterAuth attempts to connect a server after successful OAuth authentication.
+// Called asynchronously from the auth completion callback.
+func (w *DynamicWrapper) reconnectAfterAuth(serverName string) {
+	w.mu.RLock()
+	info, exists := w.dynamicServers[serverName]
+	if !exists || info.IsConnected {
+		w.mu.RUnlock()
+		return
+	}
+	serverConfig := info.Config
+	w.mu.RUnlock()
+
+	log.Printf("Auto-reconnect: attempting to connect '%s' after successful auth", serverName)
+
+	ctx := context.Background()
+
+	// Create HTTP client with auth
+	httpClient := client.NewHTTPClient(serverConfig.Name, serverConfig.URL)
+	httpClient.SetTimeout(serverConfig.GetServerTimeout())
+	if serverConfig.Auth != nil {
+		authProvider, err := client.NewAuthProviderFromConfigWithURL(serverConfig.Auth, serverConfig.URL)
+		if err != nil {
+			log.Printf("Auto-reconnect: failed to create auth provider for %s: %v", serverName, err)
+			w.publishEvent(dashboard.EventError, serverName, fmt.Sprintf("Auto-reconnect failed: %v", err))
+			return
+		}
+		if authProvider != nil {
+			httpClient.SetAuthProvider(authProvider)
+		}
+	}
+	w.wireClientCallbackHandler(httpClient)
+
+	if err := httpClient.Connect(ctx); err != nil {
+		log.Printf("Auto-reconnect: failed to connect %s: %v", serverName, err)
+		w.publishEvent(dashboard.EventError, serverName, fmt.Sprintf("Auto-reconnect failed: %v", err))
+		return
+	}
+
+	if _, err := httpClient.Initialize(ctx); err != nil {
+		httpClient.Close()
+		log.Printf("Auto-reconnect: failed to initialize %s: %v", serverName, err)
+		w.publishEvent(dashboard.EventError, serverName, fmt.Sprintf("Auto-reconnect failed: %v", err))
+		return
+	}
+
+	tools, err := httpClient.ListTools(ctx)
+	if err != nil {
+		httpClient.Close()
+		log.Printf("Auto-reconnect: failed to list tools for %s: %v", serverName, err)
+		w.publishEvent(dashboard.EventError, serverName, fmt.Sprintf("Auto-reconnect failed: %v", err))
+		return
+	}
+
+	// Update server state
+	w.mu.Lock()
+	info, exists = w.dynamicServers[serverName]
+	if !exists {
+		w.mu.Unlock()
+		httpClient.Close()
+		return
+	}
+
+	info.Client = httpClient
+	info.ErrorMessage = ""
+
+	// Update proxy server's client list
+	w.proxyServer.mu.Lock()
+	clientFound := false
+	for i, c := range w.proxyServer.clients {
+		if c.ServerName() == serverName {
+			w.proxyServer.clients[i] = httpClient
+			clientFound = true
+			break
+		}
+	}
+	if !clientFound {
+		w.proxyServer.clients = append(w.proxyServer.clients, httpClient)
+	}
+	w.proxyServer.mu.Unlock()
+
+	// Register tools in registry and with MCP server
+	var toolNames []string
+	for _, tool := range tools {
+		prefixedName := fmt.Sprintf("%s_%s", info.Config.Prefix, tool.Name)
+		toolNames = append(toolNames, prefixedName)
+
+		remoteTool := discovery.RemoteTool{
+			OriginalName: tool.Name,
+			PrefixedName: prefixedName,
+			Description:  tool.Description,
+			InputSchema:  tool.InputSchema,
+			ServerName:   serverName,
+		}
+		w.proxyServer.registry.RegisterTool(remoteTool, httpClient)
+
+		// Create MCP tool definition
+		description := fmt.Sprintf("[%s] %s", serverName, tool.Description)
+		var mcpTool mcp.Tool
+		if len(tool.InputSchema) > 0 {
+			mcpTool = mcp.NewToolWithRawSchema(prefixedName, description, tool.InputSchema)
+		} else {
+			mcpTool = mcp.NewTool(prefixedName, mcp.WithDescription(description))
+		}
+
+		handler := w.createDynamicProxyHandler(serverName, tool.Name)
+		w.baseServer.AddTool(mcpTool, handler)
+	}
+
+	info.Tools = toolNames
+	info.IsConnected = true
+	w.mu.Unlock()
+
+	log.Printf("Auto-reconnect: server '%s' connected with %d tools", serverName, len(tools))
+	w.publishEvent(dashboard.EventConnection, serverName, fmt.Sprintf("Server auto-reconnected with %d tools", len(tools)))
 }
 
 // RevokeAuth implements dashboard.AuthTrigger — removes stored tokens for a server.

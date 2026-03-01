@@ -19,6 +19,9 @@ servers:
     command: "./test-servers/math-server"
     timeout: "30s"
 
+dashboard:
+  port: 8200
+
 proxy:
   healthCheckInterval: "30s"
   connectionTimeout: "10s"

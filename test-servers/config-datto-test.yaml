@@ -1,0 +1,29 @@
+# Test config for connecting to Datto RMM Smart MCP via OAuth
+# Usage:
+#   ./bin/mcp-debug --proxy --config test-servers/config-datto-test.yaml
+#
+# The OAuth flow will:
+#   1. Dynamically register as a client
+#   2. Open your browser for Azure/Entra ID login
+#   3. Receive the callback and exchange for tokens
+#   4. Persist tokens to ~/.mcp-debug/tokens/datto-rmm.json
+
+servers:
+  - name: "datto-rmm"
+    prefix: "datto"
+    transport: "http"
+    url: "https://datto-rmm-smart-mcp.exactpartners.com/"
+    timeout: "60s"
+    auth:
+      type: "oauth"
+      scopes: "access_as_user"
+      token_file: "~/.mcp-debug/tokens/datto-rmm.json"
+      redirect_port: 8200
+
+dashboard:
+  port: 8200
+
+proxy:
+  healthCheckInterval: "30s"
+  connectionTimeout: "30s"
+  maxRetries: 3

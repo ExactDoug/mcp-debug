@@ -26,6 +26,11 @@ type ProxyServer struct {
 	recorderFunc     proxy.RecorderFunc // Optional recorder for tool call traffic
 	metadataFunc     func(*mcp.CallToolResult) *mcp.CallToolResult // Optional metadata injector
 
+	// Optional callback handler for OAuth — wired to OAuthProviders before Connect
+	callbackHandler  client.CallbackHandler
+	// Optional callback for auth events (e.g., dashboard event bus)
+	onAuthEvent      func(serverName, message string)
+
 	mu           sync.RWMutex
 	initialized  bool
 }
@@ -38,6 +43,13 @@ func NewProxyServer(cfg *config.ProxyConfig) *ProxyServer {
 		discoverer: discovery.NewDiscoverer(cfg),
 		clients:    make([]client.MCPClient, 0),
 	}
+}
+
+// SetCallbackHandler sets the OAuth callback handler for HTTP clients.
+// Must be called before Initialize so OAuthProviders have the handler before connecting.
+func (p *ProxyServer) SetCallbackHandler(h client.CallbackHandler, onAuthEvent func(serverName, message string)) {
+	p.callbackHandler = h
+	p.onAuthEvent = onAuthEvent
 }
 
 // Initialize sets up the proxy server by connecting to all remote servers and discovering tools
@@ -204,6 +216,20 @@ func (p *ProxyServer) createAndConnectClient(ctx context.Context, serverName str
 			}
 			if authProvider != nil {
 				httpClient.SetAuthProvider(authProvider)
+				// Wire callback handler before Connect so OAuth flows use the dashboard
+				if p.callbackHandler != nil {
+					if oauthProvider, ok := authProvider.(*client.OAuthProvider); ok {
+						oauthProvider.SetCallbackHandler(p.callbackHandler)
+						oauthProvider.SetServerName(serverConfig.Name)
+						if p.onAuthEvent != nil {
+							onAuth := p.onAuthEvent
+							name := serverConfig.Name
+							oauthProvider.SetAuthEventFunc(func(_, message string) {
+								onAuth(name, message)
+							})
+						}
+					}
+				}
 			}
 		}
 		mcpClient = httpClient

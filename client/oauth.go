@@ -49,6 +49,8 @@ type OAuthProvider struct {
 	serverName string
 	// Optional: callback for auth events (published to dashboard event bus).
 	onAuthEvent func(serverName, message string)
+	// Optional: callback for auth success (e.g., trigger auto-reconnect).
+	onAuthSuccess func()
 }
 
 // OAuthConfig holds configuration for creating an OAuthProvider.
@@ -109,6 +111,12 @@ func (p *OAuthProvider) SetServerName(name string) {
 // SetAuthEventFunc sets a callback for auth events (e.g., dashboard event bus).
 func (p *OAuthProvider) SetAuthEventFunc(fn func(serverName, message string)) {
 	p.onAuthEvent = fn
+}
+
+// SetAuthSuccessFunc sets a callback that fires after successful authentication.
+// Used by the integration layer to trigger auto-reconnect after dashboard-initiated auth.
+func (p *OAuthProvider) SetAuthSuccessFunc(fn func()) {
+	p.onAuthSuccess = fn
 }
 
 // ApplyAuth sets the Authorization header with the current access token.
@@ -273,6 +281,9 @@ func (p *OAuthProvider) InitiateAuthFlow(ctx context.Context) (string, error) {
 		log.Printf("[DEBUG] OAuthProvider: dashboard-initiated auth successful")
 		if p.onAuthEvent != nil {
 			p.onAuthEvent(p.serverName, "Authentication successful")
+		}
+		if p.onAuthSuccess != nil {
+			p.onAuthSuccess()
 		}
 	}()
 
