@@ -8,7 +8,7 @@ A debugging and development tool for [Model Context Protocol (MCP)](https://mode
 [![PyPI](https://img.shields.io/pypi/v/mcp-debug.svg)](https://pypi.org/project/mcp-debug/)
 [![npm](https://img.shields.io/npm/v/mcp-debug.svg)](https://www.npmjs.com/package/mcp-debug)
 
-MCP Debug enables rapid development and testing of MCP servers with hot-swapping, session recording, and automated playback testing.
+MCP Debug enables rapid development and testing of MCP servers with hot-swapping, HTTP-stream transport with OAuth 2.1 authentication, a local web dashboard, session recording, and automated playback testing.
 
 ## Features
 
@@ -27,6 +27,21 @@ MCP Debug enables rapid development and testing of MCP servers with hot-swapping
 - Playback server mode - replay responses to test clients
 - Regression testing with recorded sessions
 - **[📖 Recording Documentation](docs/RECORDING.md)** - Complete recording guide
+
+### HTTP-Stream Transport
+- Connect to remote MCP servers over HTTP ([Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http) transport)
+- Bearer token and OAuth 2.1 with PKCE authentication
+- Automatic token refresh and persistent token storage
+- SSE response parsing for streaming servers
+- RFC 9728 (Protected Resource Metadata) and RFC 8414 (Authorization Server Metadata) discovery
+- RFC 7591 Dynamic Client Registration
+
+### Web Dashboard
+- Real-time server status monitoring at `http://localhost:8100`
+- Pre-flight OAuth authentication — authenticate before first tool call
+- Live event feed (tool calls, auth events, connections) via SSE
+- Dual-path auth: authenticate via dashboard OR automatic 401-triggered flow
+- **[Dashboard Documentation](docs/DASHBOARD.md)** — Complete dashboard guide
 
 ### Development Proxy
 - Multi-server aggregation with tool prefixing
@@ -97,8 +112,10 @@ mcp-tui uvx mcp-debug --playback-server session.jsonl
 
 ## Configuration
 
+### STDIO Transport
+
 ```yaml
-# config.yaml
+# config.yaml — local STDIO server
 servers:
   - name: "filesystem"
     prefix: "fs"
@@ -113,13 +130,45 @@ proxy:
   maxRetries: 3
 ```
 
+### HTTP Transport with Authentication
+
+```yaml
+# config.yaml — remote HTTP server with OAuth
+servers:
+  - name: "remote-api"
+    prefix: "api"
+    transport: "http"
+    url: "https://example.com/mcp"
+    auth:
+      type: "oauth"
+      client_id: "my-app-id"          # Optional: omit for dynamic registration (RFC 7591)
+      scopes: "read write"
+      token_file: "~/.mcp-tokens.json" # Persistent token storage
+    timeout: "60s"
+
+  # Bearer token auth (simpler, no OAuth flow)
+  - name: "internal-api"
+    prefix: "int"
+    transport: "http"
+    url: "https://internal.example.com/mcp"
+    auth:
+      type: "bearer"
+      token: "${MCP_API_TOKEN}"
+
+# Dashboard settings (optional — enabled by default)
+dashboard:
+  enabled: true   # default: true
+  port: 8100      # default: 8100
+```
+
 ### Environment Variables
 
 ```bash
-MCP_LOG_FILE="/tmp/mcp-debug.log"  # Log location
-MCP_DEBUG=1                         # Enable debug logging
-MCP_RECORD_FILE="session.jsonl"     # Auto-record sessions
-MCP_CONFIG_PATH="./config.yaml"     # Default config
+MCP_LOG_FILE="/tmp/mcp-debug.log"    # Log location
+MCP_DEBUG=1                           # Enable debug logging
+MCP_RECORD_FILE="session.jsonl"       # Auto-record sessions
+MCP_CONFIG_PATH="./config.yaml"       # Default config
+MCP_DEBUG_NO_DASHBOARD=true           # Disable web dashboard (headless/CI)
 ```
 
 ## Environment Variable Inheritance (DRAFT)
@@ -263,7 +312,8 @@ uvx mcp-debug tools list          # List tools with details
 mcp-debug/
 ├── main.go              # CLI entry point
 ├── config/              # Configuration loading
-├── client/              # MCP client implementation
+├── client/              # MCP client (STDIO + HTTP-stream + auth)
+├── dashboard/           # Web dashboard server and SPA
 ├── integration/         # Proxy server and wrapper
 ├── discovery/           # Tool discovery
 ├── proxy/               # Request forwarding

@@ -16,6 +16,7 @@ import (
 
 	"mcp-debug/client"
 	"mcp-debug/config"
+	"mcp-debug/dashboard"
 	"mcp-debug/discovery"
 )
 
@@ -25,12 +26,15 @@ type DynamicWrapper struct {
 	proxyServer   *ProxyServer
 	dynamicServers map[string]*DynamicServerInfo
 	mu            sync.RWMutex
-	
+
 	// Recording functionality
 	recordFile     *os.File
 	recordEnabled  bool
 	recordMu       sync.Mutex
 	recordFilename string // Path to the recording file (for metadata)
+
+	// Dashboard web server
+	dashboard *dashboard.Server
 }
 
 type DynamicServerInfo struct {
@@ -77,10 +81,18 @@ func NewDynamicWrapper(cfg *config.ProxyConfig) *DynamicWrapper {
 		proxyServer:    proxyServer,
 		dynamicServers: make(map[string]*DynamicServerInfo),
 	}
-	
+
+	// Create dashboard if enabled
+	if cfg.Dashboard.IsEnabled() {
+		port := cfg.Dashboard.GetPort()
+		wrapper.dashboard = dashboard.NewServer(port)
+		wrapper.dashboard.SetStatusProvider(wrapper)
+		wrapper.dashboard.SetAuthTrigger(wrapper)
+	}
+
 	// Register management tools
 	wrapper.registerManagementTools()
-	
+
 	return wrapper
 }
 
@@ -301,32 +313,50 @@ func (w *DynamicWrapper) handleServerAdd(ctx context.Context, request mcp.CallTo
 		return result, nil
 	}
 	
-	// Create server config
-	serverConfig := config.ServerConfig{
-		Name:      name,
-		Prefix:    name,
-		Transport: "stdio",
-		Command:   parts[0],
-		Args:      parts[1:],
-		Timeout:   "30s",
+	// Create server config - detect HTTP URLs
+	var serverConfig config.ServerConfig
+	var mcpClient client.MCPClient
+
+	if strings.HasPrefix(command, "http://") || strings.HasPrefix(command, "https://") {
+		// HTTP transport
+		serverConfig = config.ServerConfig{
+			Name:      name,
+			Prefix:    name,
+			Transport: "http",
+			URL:       command,
+			Timeout:   "30s",
+		}
+		httpClient := client.NewHTTPClient(name, command)
+		httpClient.SetTimeout(serverConfig.GetServerTimeout())
+		mcpClient = httpClient
+
+		// Wire dashboard callback handler
+		w.wireClientCallbackHandler(httpClient)
+	} else {
+		// stdio transport
+		serverConfig = config.ServerConfig{
+			Name:      name,
+			Prefix:    name,
+			Transport: "stdio",
+			Command:   parts[0],
+			Args:      parts[1:],
+			Timeout:   "30s",
+		}
+		stdioClient := client.NewStdioClient(name, serverConfig.Command, serverConfig.Args)
+		inheritCfg := serverConfig.ResolveInheritConfig(w.proxyServer.config.Inherit)
+		stdioClient.SetInheritConfig(inheritCfg)
+		mcpClient = stdioClient
 	}
-	
-	// Create and connect client
-	stdioClient := client.NewStdioClient(name, serverConfig.Command, serverConfig.Args)
 
-	// Use default inheritance (tier1 or proxy defaults)
-	inheritCfg := serverConfig.ResolveInheritConfig(w.proxyServer.config.Inherit)
-	stdioClient.SetInheritConfig(inheritCfg)
-
-	if err := stdioClient.Connect(ctx); err != nil {
+	if err := mcpClient.Connect(ctx); err != nil {
 		result := mcp.NewToolResultError(fmt.Sprintf("Failed to connect: %v", err))
 		result = w.addRecordingMetadata(result)
 		w.recordMessage("response", "tool_call", "server_add", "proxy", result)
 		return result, nil
 	}
 
-	if _, err := stdioClient.Initialize(ctx); err != nil {
-		stdioClient.Close()
+	if _, err := mcpClient.Initialize(ctx); err != nil {
+		mcpClient.Close()
 		result := mcp.NewToolResultError(fmt.Sprintf("Failed to initialize: %v", err))
 		result = w.addRecordingMetadata(result)
 		w.recordMessage("response", "tool_call", "server_add", "proxy", result)
@@ -334,19 +364,19 @@ func (w *DynamicWrapper) handleServerAdd(ctx context.Context, request mcp.CallTo
 	}
 
 	// List tools
-	tools, err := stdioClient.ListTools(ctx)
+	tools, err := mcpClient.ListTools(ctx)
 	if err != nil {
-		stdioClient.Close()
+		mcpClient.Close()
 		result := mcp.NewToolResultError(fmt.Sprintf("Failed to list tools: %v", err))
 		result = w.addRecordingMetadata(result)
 		w.recordMessage("response", "tool_call", "server_add", "proxy", result)
 		return result, nil
 	}
-	
+
 	// Store server info
 	serverInfo := &DynamicServerInfo{
 		Name:        name,
-		Client:      stdioClient,
+		Client:      mcpClient,
 		Config:      serverConfig,
 		Tools:       make([]string, 0, len(tools)),
 		IsConnected: true,
@@ -365,7 +395,7 @@ func (w *DynamicWrapper) handleServerAdd(ctx context.Context, request mcp.CallTo
 		}
 		
 		// Register with proxy registry
-		w.proxyServer.registry.RegisterTool(discoveredTool, stdioClient)
+		w.proxyServer.registry.RegisterTool(discoveredTool, mcpClient)
 		
 		// Create MCP tool
 		mcpTool := w.proxyServer.createMCPTool(discoveredTool)
@@ -385,8 +415,10 @@ func (w *DynamicWrapper) handleServerAdd(ctx context.Context, request mcp.CallTo
 	w.dynamicServers[name] = serverInfo
 	
 	// Also add to proxy server's client list
-	w.proxyServer.clients = append(w.proxyServer.clients, stdioClient)
+	w.proxyServer.clients = append(w.proxyServer.clients, mcpClient)
 	
+	w.publishEvent(dashboard.EventConnection, name, fmt.Sprintf("Server added with %d tools", registeredCount))
+
 	result := fmt.Sprintf("Added server '%s' with command: %s %s\nRegistered %d tools successfully.",
 		name, serverConfig.Command, strings.Join(serverConfig.Args, " "), registeredCount)
 
@@ -564,7 +596,9 @@ func (w *DynamicWrapper) handleServerDisconnect(ctx context.Context, request mcp
 	serverInfo.IsConnected = false
 	serverInfo.ErrorMessage = "Server disconnected by user"
 	serverInfo.Client = nil
-	
+
+	w.publishEvent(dashboard.EventConnection, name, "Server disconnected")
+
 	result := fmt.Sprintf("Disconnected server '%s'. Tools remain registered but will return errors.\\nUse server_reconnect to restore with new binary/command.", name)
 	toolResult := mcp.NewToolResultText(result)
 	toolResult = w.addRecordingMetadata(toolResult)
@@ -643,23 +677,38 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 		serverConfig = serverInfo.Config
 	}
 
-	// Create and connect new client
-	stdioClient := client.NewStdioClient(serverConfig.Name, serverConfig.Command, serverConfig.Args)
+	// Create client based on transport type
+	var mcpClient client.MCPClient
 
-	// Apply inheritance config from stored ServerConfig
-	inheritCfg := serverConfig.ResolveInheritConfig(w.proxyServer.config.Inherit)
-	stdioClient.SetInheritConfig(inheritCfg)
-
-	// Apply environment variables from stored ServerConfig
-	if len(serverConfig.Env) > 0 {
-		var env []string
-		for key, value := range serverConfig.Env {
-			env = append(env, fmt.Sprintf("%s=%s", key, value))
+	switch serverConfig.Transport {
+	case "http":
+		httpClient := client.NewHTTPClient(serverConfig.Name, serverConfig.URL)
+		httpClient.SetTimeout(serverConfig.GetServerTimeout())
+		if serverConfig.Auth != nil {
+			authProvider, err := client.NewAuthProviderFromConfigWithURL(serverConfig.Auth, serverConfig.URL)
+			if err != nil {
+				log.Printf("Warning: failed to create auth provider for %s: %v", serverConfig.Name, err)
+			} else if authProvider != nil {
+				httpClient.SetAuthProvider(authProvider)
+			}
 		}
-		stdioClient.SetEnvironment(env)
+		w.wireClientCallbackHandler(httpClient)
+		mcpClient = httpClient
+	default: // stdio
+		stdioClient := client.NewStdioClient(serverConfig.Name, serverConfig.Command, serverConfig.Args)
+		inheritCfg := serverConfig.ResolveInheritConfig(w.proxyServer.config.Inherit)
+		stdioClient.SetInheritConfig(inheritCfg)
+		if len(serverConfig.Env) > 0 {
+			var env []string
+			for key, value := range serverConfig.Env {
+				env = append(env, fmt.Sprintf("%s=%s", key, value))
+			}
+			stdioClient.SetEnvironment(env)
+		}
+		mcpClient = stdioClient
 	}
 
-	if err := stdioClient.Connect(ctx); err != nil {
+	if err := mcpClient.Connect(ctx); err != nil {
 		// Mark as disconnected but keep tools registered
 		serverInfo.IsConnected = false
 		serverInfo.ErrorMessage = fmt.Sprintf("Failed to connect: %v", err)
@@ -670,8 +719,8 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 		return toolResult, nil
 	}
 
-	if _, err := stdioClient.Initialize(ctx); err != nil {
-		stdioClient.Close()
+	if _, err := mcpClient.Initialize(ctx); err != nil {
+		mcpClient.Close()
 		serverInfo.IsConnected = false
 		serverInfo.ErrorMessage = fmt.Sprintf("Failed to initialize: %v", err)
 		serverInfo.Config = serverConfig
@@ -682,9 +731,9 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 	}
 
 	// List tools from new server
-	tools, err := stdioClient.ListTools(ctx)
+	tools, err := mcpClient.ListTools(ctx)
 	if err != nil {
-		stdioClient.Close()
+		mcpClient.Close()
 		serverInfo.IsConnected = false
 		serverInfo.ErrorMessage = fmt.Sprintf("Failed to list tools: %v", err)
 		serverInfo.Config = serverConfig
@@ -695,7 +744,7 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 	}
 	
 	// Update server info (but NOT IsConnected yet - defer until all state updated)
-	serverInfo.Client = stdioClient
+	serverInfo.Client = mcpClient
 	serverInfo.Config = serverConfig
 	serverInfo.ErrorMessage = ""
 
@@ -704,14 +753,14 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 	clientFound := false
 	for i, c := range w.proxyServer.clients {
 		if c.ServerName() == name {
-			w.proxyServer.clients[i] = stdioClient
+			w.proxyServer.clients[i] = mcpClient
 			clientFound = true
 			break
 		}
 	}
 	if !clientFound {
 		// Client not in list (was removed by disconnect), append it
-		w.proxyServer.clients = append(w.proxyServer.clients, stdioClient)
+		w.proxyServer.clients = append(w.proxyServer.clients, mcpClient)
 		log.Printf("Added client '%s' to proxy server's client list", name)
 	} else {
 		log.Printf("Updated client '%s' in proxy server's client list", name)
@@ -740,7 +789,7 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 				InputSchema:  tool.InputSchema,
 				ServerName:   name,
 			}
-			w.proxyServer.registry.RegisterTool(discoveredTool, stdioClient)
+			w.proxyServer.registry.RegisterTool(discoveredTool, mcpClient)
 			log.Printf("Updated tool registration: %s", prefixedName)
 		}
 	}
@@ -748,6 +797,8 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 	// NOW mark as connected (atomic state transition after all updates complete)
 	serverInfo.IsConnected = true
 	log.Printf("Server '%s' marked as connected", name)
+
+	w.publishEvent(dashboard.EventConnection, name, "Server reconnected")
 
 	// Build result message based on how we reconnected
 	var resultMsg string
@@ -806,6 +857,9 @@ func (w *DynamicWrapper) createDynamicProxyHandler(serverName, originalToolName 
 		for key, value := range args {
 			argsMap[key] = value
 		}
+
+		// Publish tool call event to dashboard
+		w.publishEvent(dashboard.EventToolCall, serverName, fmt.Sprintf("Calling %s", prefixedToolName))
 
 		// Forward the call to the remote server using copied client reference
 		// (safe from concurrent disconnect)
@@ -875,10 +929,36 @@ func isConnectionError(err error) bool {
 
 // Initialize initializes the proxy with static servers
 func (w *DynamicWrapper) Initialize(ctx context.Context) error {
+	// Start dashboard before creating clients (needed for OAuth callback handler)
+	if w.dashboard != nil {
+		if err := w.dashboard.Start(); err != nil {
+			log.Printf("Warning: failed to start dashboard: %v", err)
+			// Non-fatal — continue without dashboard
+			w.dashboard = nil
+		}
+	}
+
+	// Wire callback handler to proxy server BEFORE Initialize so OAuthProviders
+	// have the dashboard callback handler before they attempt to connect.
+	// This prevents the port conflict where the ephemeral callback server tries
+	// to bind the same port the dashboard is already using.
+	if w.dashboard != nil {
+		w.proxyServer.SetCallbackHandler(w.dashboard.Callbacks(), func(serverName, message string) {
+			w.dashboard.Events().Publish(dashboard.Event{
+				Type:    dashboard.EventAuth,
+				Server:  serverName,
+				Message: message,
+			})
+		})
+	}
+
 	// Initialize the proxy server with static servers
 	if err := w.proxyServer.Initialize(ctx); err != nil {
 		return err
 	}
+
+	// Wire any remaining callback handlers (e.g., for dynamically added servers)
+	w.wireCallbackHandlers()
 
 	// Populate dynamicServers map with static servers
 	if err := w.populateStaticServers(); err != nil {
@@ -890,6 +970,51 @@ func (w *DynamicWrapper) Initialize(ctx context.Context) error {
 	w.createHandlersForAllTools()
 
 	return nil
+}
+
+// wireCallbackHandlers sets the dashboard callback handler on all OAuthProviders.
+func (w *DynamicWrapper) wireCallbackHandlers() {
+	if w.dashboard == nil {
+		return
+	}
+
+	for _, c := range w.proxyServer.clients {
+		w.wireClientCallbackHandler(c)
+	}
+}
+
+// wireClientCallbackHandler wires dashboard callback handler to a single client's OAuthProvider.
+func (w *DynamicWrapper) wireClientCallbackHandler(c client.MCPClient) {
+	if w.dashboard == nil {
+		return
+	}
+
+	httpClient, ok := c.(*client.HTTPClient)
+	if !ok {
+		return
+	}
+
+	provider := httpClient.GetAuthProvider()
+	if provider == nil {
+		return
+	}
+
+	oauthProvider, ok := provider.(*client.OAuthProvider)
+	if !ok {
+		return
+	}
+
+	oauthProvider.SetCallbackHandler(w.dashboard.Callbacks())
+	oauthProvider.SetServerName(httpClient.ServerName())
+	oauthProvider.SetAuthEventFunc(func(serverName, message string) {
+		if w.dashboard != nil {
+			w.dashboard.Events().Publish(dashboard.Event{
+				Type:    dashboard.EventAuth,
+				Server:  serverName,
+				Message: message,
+			})
+		}
+	})
 }
 
 // populateStaticServers adds static servers from config to dynamicServers map
@@ -985,8 +1110,286 @@ func (w *DynamicWrapper) createHandlersForAllTools() {
 	}
 }
 
+// GetServerStatuses implements dashboard.ServerStatusProvider.
+func (w *DynamicWrapper) GetServerStatuses() []dashboard.ServerStatus {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	statuses := make([]dashboard.ServerStatus, 0, len(w.dynamicServers))
+	for _, info := range w.dynamicServers {
+		status := dashboard.ServerStatus{
+			Name:      info.Name,
+			Prefix:    info.Config.Prefix,
+			Transport: info.Config.Transport,
+			URL:       info.Config.URL,
+			Connected: info.IsConnected,
+			ToolCount: len(info.Tools),
+			Error:     info.ErrorMessage,
+		}
+
+		// Get auth status for HTTP servers
+		if info.Config.Transport == "http" && info.Client != nil {
+			if httpClient, ok := info.Client.(*client.HTTPClient); ok {
+				if provider := httpClient.GetAuthProvider(); provider != nil {
+					if tsp, ok := provider.(client.TokenStatusProvider); ok {
+						ts := tsp.GetTokenStatus()
+						authType := "oauth"
+						if info.Config.Auth != nil {
+							authType = info.Config.Auth.Type
+						}
+						status.Auth = &dashboard.AuthStatus{
+							Type:            authType,
+							Status:          ts.Status,
+							TokenExpiresMin: ts.ExpiresInMin,
+							Scopes:          ts.Scopes,
+							ClientID:        ts.ClientID,
+						}
+					}
+				}
+			}
+		} else if info.Config.Transport == "http" && info.Config.Auth != nil && info.Config.Auth.Type == "oauth" {
+			// Disconnected HTTP server with OAuth config — check token store
+			authStatus := "needs_auth"
+			var expiresMin int
+			if info.Config.Auth.TokenFile != "" {
+				store := client.NewTokenStore(info.Config.Auth.TokenFile)
+				if token, err := store.Load(); err == nil && token != nil {
+					if token.IsExpired() {
+						authStatus = "expired"
+					} else {
+						authStatus = "authenticated"
+						if !token.ExpiresAt.IsZero() {
+							remaining := time.Until(token.ExpiresAt)
+							expiresMin = int(remaining.Minutes())
+						}
+					}
+				}
+			}
+			status.Auth = &dashboard.AuthStatus{
+				Type:            "oauth",
+				Status:          authStatus,
+				TokenExpiresMin: expiresMin,
+			}
+		}
+
+		statuses = append(statuses, status)
+	}
+
+	return statuses
+}
+
+// TriggerAuth implements dashboard.AuthTrigger — starts an OAuth flow for a server.
+func (w *DynamicWrapper) TriggerAuth(ctx context.Context, serverName string) (string, error) {
+	w.mu.RLock()
+	info, exists := w.dynamicServers[serverName]
+	w.mu.RUnlock()
+
+	if !exists {
+		return "", fmt.Errorf("server '%s' not found", serverName)
+	}
+
+	if info.Config.Transport != "http" {
+		return "", fmt.Errorf("server '%s' uses %s transport, OAuth not applicable", serverName, info.Config.Transport)
+	}
+
+	if info.Config.Auth == nil || info.Config.Auth.Type != "oauth" {
+		return "", fmt.Errorf("server '%s' does not use OAuth", serverName)
+	}
+
+	// If the server has a connected client with an OAuthProvider, use it directly
+	if info.Client != nil {
+		if httpClient, ok := info.Client.(*client.HTTPClient); ok {
+			if provider := httpClient.GetAuthProvider(); provider != nil {
+				if oauthProvider, ok := provider.(*client.OAuthProvider); ok {
+					return oauthProvider.InitiateAuthFlow(ctx)
+				}
+			}
+		}
+	}
+
+	// Server is disconnected (e.g., discovery failed due to no token).
+	// Create a standalone OAuthProvider from config to perform the auth flow.
+	// Once tokens are stored, server_reconnect will pick them up.
+	oauthProvider, err := client.NewOAuthProviderFromConfig(info.Config.Auth, info.Config.URL)
+	if err != nil {
+		return "", fmt.Errorf("failed to create auth provider for '%s': %w", serverName, err)
+	}
+
+	// Wire callback handler, events, and auto-reconnect
+	if w.dashboard != nil {
+		oauthProvider.SetCallbackHandler(w.dashboard.Callbacks())
+		oauthProvider.SetServerName(serverName)
+		oauthProvider.SetAuthEventFunc(func(sn, message string) {
+			w.dashboard.Events().Publish(dashboard.Event{
+				Type:    dashboard.EventAuth,
+				Server:  sn,
+				Message: message,
+			})
+		})
+	}
+
+	// After successful auth, auto-reconnect the server
+	oauthProvider.SetAuthSuccessFunc(func() {
+		go w.reconnectAfterAuth(serverName)
+	})
+
+	return oauthProvider.InitiateAuthFlow(ctx)
+}
+
+// reconnectAfterAuth attempts to connect a server after successful OAuth authentication.
+// Called asynchronously from the auth completion callback.
+func (w *DynamicWrapper) reconnectAfterAuth(serverName string) {
+	w.mu.RLock()
+	info, exists := w.dynamicServers[serverName]
+	if !exists || info.IsConnected {
+		w.mu.RUnlock()
+		return
+	}
+	serverConfig := info.Config
+	w.mu.RUnlock()
+
+	log.Printf("Auto-reconnect: attempting to connect '%s' after successful auth", serverName)
+
+	ctx := context.Background()
+
+	// Create HTTP client with auth
+	httpClient := client.NewHTTPClient(serverConfig.Name, serverConfig.URL)
+	httpClient.SetTimeout(serverConfig.GetServerTimeout())
+	if serverConfig.Auth != nil {
+		authProvider, err := client.NewAuthProviderFromConfigWithURL(serverConfig.Auth, serverConfig.URL)
+		if err != nil {
+			log.Printf("Auto-reconnect: failed to create auth provider for %s: %v", serverName, err)
+			w.publishEvent(dashboard.EventError, serverName, fmt.Sprintf("Auto-reconnect failed: %v", err))
+			return
+		}
+		if authProvider != nil {
+			httpClient.SetAuthProvider(authProvider)
+		}
+	}
+	w.wireClientCallbackHandler(httpClient)
+
+	if err := httpClient.Connect(ctx); err != nil {
+		log.Printf("Auto-reconnect: failed to connect %s: %v", serverName, err)
+		w.publishEvent(dashboard.EventError, serverName, fmt.Sprintf("Auto-reconnect failed: %v", err))
+		return
+	}
+
+	if _, err := httpClient.Initialize(ctx); err != nil {
+		httpClient.Close()
+		log.Printf("Auto-reconnect: failed to initialize %s: %v", serverName, err)
+		w.publishEvent(dashboard.EventError, serverName, fmt.Sprintf("Auto-reconnect failed: %v", err))
+		return
+	}
+
+	tools, err := httpClient.ListTools(ctx)
+	if err != nil {
+		httpClient.Close()
+		log.Printf("Auto-reconnect: failed to list tools for %s: %v", serverName, err)
+		w.publishEvent(dashboard.EventError, serverName, fmt.Sprintf("Auto-reconnect failed: %v", err))
+		return
+	}
+
+	// Update server state
+	w.mu.Lock()
+	info, exists = w.dynamicServers[serverName]
+	if !exists {
+		w.mu.Unlock()
+		httpClient.Close()
+		return
+	}
+
+	info.Client = httpClient
+	info.ErrorMessage = ""
+
+	// Update proxy server's client list
+	w.proxyServer.mu.Lock()
+	clientFound := false
+	for i, c := range w.proxyServer.clients {
+		if c.ServerName() == serverName {
+			w.proxyServer.clients[i] = httpClient
+			clientFound = true
+			break
+		}
+	}
+	if !clientFound {
+		w.proxyServer.clients = append(w.proxyServer.clients, httpClient)
+	}
+	w.proxyServer.mu.Unlock()
+
+	// Register tools in registry and with MCP server
+	var toolNames []string
+	for _, tool := range tools {
+		prefixedName := fmt.Sprintf("%s_%s", info.Config.Prefix, tool.Name)
+		toolNames = append(toolNames, prefixedName)
+
+		remoteTool := discovery.RemoteTool{
+			OriginalName: tool.Name,
+			PrefixedName: prefixedName,
+			Description:  tool.Description,
+			InputSchema:  tool.InputSchema,
+			ServerName:   serverName,
+		}
+		w.proxyServer.registry.RegisterTool(remoteTool, httpClient)
+
+		// Create MCP tool definition
+		description := fmt.Sprintf("[%s] %s", serverName, tool.Description)
+		var mcpTool mcp.Tool
+		if len(tool.InputSchema) > 0 {
+			mcpTool = mcp.NewToolWithRawSchema(prefixedName, description, tool.InputSchema)
+		} else {
+			mcpTool = mcp.NewTool(prefixedName, mcp.WithDescription(description))
+		}
+
+		handler := w.createDynamicProxyHandler(serverName, tool.Name)
+		w.baseServer.AddTool(mcpTool, handler)
+	}
+
+	info.Tools = toolNames
+	info.IsConnected = true
+	w.mu.Unlock()
+
+	log.Printf("Auto-reconnect: server '%s' connected with %d tools", serverName, len(tools))
+	w.publishEvent(dashboard.EventConnection, serverName, fmt.Sprintf("Server auto-reconnected with %d tools", len(tools)))
+}
+
+// RevokeAuth implements dashboard.AuthTrigger — removes stored tokens for a server.
+func (w *DynamicWrapper) RevokeAuth(serverName string) error {
+	w.mu.RLock()
+	info, exists := w.dynamicServers[serverName]
+	w.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("server '%s' not found", serverName)
+	}
+
+	if info.Config.Auth != nil && info.Config.Auth.TokenFile != "" {
+		store := client.NewTokenStore(info.Config.Auth.TokenFile)
+		return store.Delete()
+	}
+
+	return fmt.Errorf("server '%s' has no token store configured", serverName)
+}
+
+// publishEvent sends an event to the dashboard event bus if available.
+func (w *DynamicWrapper) publishEvent(eventType dashboard.EventType, serverName, message string) {
+	if w.dashboard != nil {
+		w.dashboard.Events().Publish(dashboard.Event{
+			Type:    eventType,
+			Server:  serverName,
+			Message: message,
+		})
+	}
+}
+
 // Start starts the MCP server
 func (w *DynamicWrapper) Start() error {
 	log.Println("Starting Dynamic MCP Proxy Server with management tools...")
 	return server.ServeStdio(w.baseServer)
+}
+
+// StopDashboard stops the dashboard server if running.
+func (w *DynamicWrapper) StopDashboard() {
+	if w.dashboard != nil {
+		w.dashboard.Stop()
+	}
 }

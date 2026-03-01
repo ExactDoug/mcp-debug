@@ -67,7 +67,7 @@ func NewInitializeRequest(idGen *RequestIDGenerator, clientName, clientVersion s
 		JSONRPC: "2.0",
 		Method:  "initialize",
 		Params: InitializeParams{
-			ProtocolVersion: "2024-11-05",
+			ProtocolVersion: "2025-06-18",
 			Capabilities: map[string]interface{}{
 				"tools": map[string]interface{}{},
 			},

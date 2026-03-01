@@ -67,7 +67,7 @@ func (d *Discoverer) discoverServer(ctx context.Context, serverConfig config.Ser
 	case "stdio":
 		mcpClient, err = d.createStdioClient(serverConfig)
 	case "http":
-		err = fmt.Errorf("HTTP transport not yet implemented")
+		mcpClient, err = d.createHTTPClient(serverConfig)
 	default:
 		err = fmt.Errorf("unsupported transport: %s", serverConfig.Transport)
 	}
@@ -141,6 +141,29 @@ func (d *Discoverer) createStdioClient(serverConfig config.ServerConfig) (client
 	}
 	
 	return stdioClient, nil
+}
+
+// createHTTPClient creates an HTTP-stream MCP client
+func (d *Discoverer) createHTTPClient(serverConfig config.ServerConfig) (client.MCPClient, error) {
+	httpClient := client.NewHTTPClient(serverConfig.Name, serverConfig.URL)
+	httpClient.SetTimeout(serverConfig.GetServerTimeout())
+
+	// Set auth provider if configured.
+	// Discovery only uses cached tokens — no interactive OAuth flows.
+	// If the server returns 401 and there's no cached token, discovery
+	// fails gracefully and the dashboard shows "Needs Auth" for the user
+	// to authenticate proactively.
+	if serverConfig.Auth != nil {
+		authProvider, err := client.NewAuthProviderFromConfigWithURL(serverConfig.Auth, serverConfig.URL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create auth provider: %w", err)
+		}
+		if authProvider != nil {
+			httpClient.SetAuthProvider(authProvider)
+		}
+	}
+
+	return httpClient, nil
 }
 
 // CreateToolMapping creates a mapping from prefixed tool names to their metadata

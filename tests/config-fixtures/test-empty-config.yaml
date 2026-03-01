@@ -1,6 +1,9 @@
 # Empty configuration for testing dynamic management
 servers: []
 
+dashboard:
+  port: 8200
+
 proxy:
   healthCheckInterval: "30s"
   connectionTimeout: "10s"
