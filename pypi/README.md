@@ -18,6 +18,8 @@ mcp-debug --help
 ## Features
 
 - **Hot-Swap Development** - Replace server binaries without disconnecting MCP clients
+- **HTTP-Stream Transport** - Connect to remote MCP servers over HTTP with OAuth 2.1 and bearer token auth
+- **Web Dashboard** - Real-time monitoring at localhost:8100 with pre-flight OAuth and auto-reconnect
 - **Session Recording & Playback** - Record JSON-RPC traffic for debugging and testing
 - **Development Proxy** - Multi-server aggregation with tool prefixing
 - **Dynamic Server Management** - Add/remove servers at runtime

@@ -39,6 +39,7 @@ MCP Debug enables rapid development and testing of MCP servers with hot-swapping
 ### Web Dashboard
 - Real-time server status monitoring at `http://localhost:8100`
 - Pre-flight OAuth authentication — authenticate before first tool call
+- Auto-reconnect after dashboard-triggered OAuth — server connects and discovers tools automatically
 - Live event feed (tool calls, auth events, connections) via SSE
 - Dual-path auth: authenticate via dashboard OR automatic 401-triggered flow
 - **[Dashboard Documentation](docs/DASHBOARD.md)** — Complete dashboard guide
@@ -73,7 +74,7 @@ go install github.com/standardbeagle/mcp-debug@latest
 uvx mcp-debug --proxy --config config.yaml
 
 # Or with mcp-tui for interactive testing
-mcp-tui uvx mcp-debug --proxy --config config.yaml
+mcp-tui "uvx mcp-debug --proxy --config config.yaml"
 ```
 
 ## Usage
@@ -92,7 +93,7 @@ uvx mcp-debug --proxy --config config.yaml --log /tmp/debug.log
 ```
 
 **Management Tools:**
-- `server_add` - Add a server: `{name: "fs", command: "npx -y @mcp/filesystem /path"}`
+- `server_add` - Add a server: `{name: "fs", command: "npx -y @mcp/filesystem /path"}` or HTTP: `{name: "api", command: "https://example.com/mcp"}`
 - `server_remove` - Remove server completely
 - `server_disconnect` - Disconnect server (tools return errors)
 - `server_reconnect` - Reconnect with optional new command (preserves config if omitted)
@@ -105,7 +106,7 @@ uvx mcp-debug --proxy --config config.yaml --log /tmp/debug.log
 uvx mcp-debug --playback-client session.jsonl | ./your-mcp-server
 
 # Replay recorded responses to test a client
-mcp-tui uvx mcp-debug --playback-server session.jsonl
+mcp-tui "uvx mcp-debug --playback-server session.jsonl"
 ```
 
 **See [Recording Documentation](docs/RECORDING.md) for detailed recording format, workflows, and examples.**
@@ -144,6 +145,7 @@ servers:
       client_id: "my-app-id"          # Optional: omit for dynamic registration (RFC 7591)
       scopes: "read write"
       token_file: "~/.mcp-tokens.json" # Persistent token storage
+      redirect_port: 8100             # Must match dashboard port for callback
     timeout: "60s"
 
   # Bearer token auth (simpler, no OAuth flow)
@@ -237,7 +239,7 @@ For complete documentation including all configuration options, security rationa
 
 ```bash
 # 1. Start with empty config
-mcp-tui uvx mcp-debug --proxy --config empty-config.yaml
+mcp-tui "uvx mcp-debug --proxy --config empty-config.yaml"
 
 # 2. Add your server dynamically
 server_add: {name: myserver, command: ./my-server-v1}
@@ -270,7 +272,7 @@ servers:
     timeout: "300s"
 
 # 1. Start proxy with config
-mcp-tui uvx mcp-debug --proxy --config config.yaml
+mcp-tui "uvx mcp-debug --proxy --config config.yaml"
 
 # 2. Make changes to server code
 

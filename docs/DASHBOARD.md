@@ -29,9 +29,9 @@ The dashboard provides a persistent web interface at `http://localhost:8100` tha
 **Dual-path authentication.** Two independent paths to authenticate, both storing tokens in the same persistent token store:
 
 - **Path A (STDIO-triggered):** Tool call → 401 response → automatic OAuth flow → browser launch → callback → retry. This is the existing flow and remains unchanged.
-- **Path B (Dashboard-triggered):** User opens dashboard → sees "Needs Auth" → clicks Authenticate → completes OAuth in browser → token stored → future tool calls just work.
+- **Path B (Dashboard-triggered):** User opens dashboard → sees "Needs Auth" → clicks Authenticate → completes OAuth in browser → token stored → server auto-reconnects and discovers tools → future tool calls just work.
 
-If the user pre-authenticates via Path B, Path A's 401 flow is never triggered. If tokens expire and refresh fails, Path A kicks in as fallback.
+If the user pre-authenticates via Path B, the server automatically connects after auth and Path A's 401 flow is never triggered. If tokens expire and refresh fails, Path A kicks in as fallback.
 
 ## Quick Start
 
@@ -83,7 +83,7 @@ The recommended workflow for HTTP servers with OAuth:
 2. Open `http://localhost:8100` in your browser
 3. For each server showing "Needs Auth", click **Authenticate**
 4. Complete the OAuth login in the browser tab that opens
-5. Return to the dashboard — status should show "Authenticated"
+5. Return to the dashboard — the server auto-reconnects, discovers tools, and shows "Connected / Authenticated"
 6. Start using tools in your MCP client — no 401 interruptions
 
 ### OAuth Flow (Dashboard-Triggered)
@@ -123,7 +123,10 @@ Token exchange completes (PKCE code_verifier proves possession)
 Token stored in persistent TokenStore
     │
     ▼
-Dashboard SSE event: "OAuth flow completed"
+Auto-reconnect: creates HTTP client, connects, discovers tools
+    │
+    ▼
+Dashboard updates: "Connected / Authenticated (Xmin)" with tool count
 ```
 
 ### Token Revocation
