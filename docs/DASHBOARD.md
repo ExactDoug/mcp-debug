@@ -293,7 +293,13 @@ dashboard:
 
 The actual bound port becomes the source of truth for all OAuth `redirect_uri` construction — the per-server `auth.redirect_port` field is overridden automatically when the dashboard is active.
 
-**Azure / OAuth setup:** Register all ports in your OAuth app's redirect URIs once:
+#### When localhost callback registration is needed
+
+The localhost callback URL only needs to be registered in your OAuth provider (e.g., Azure app registration) when mcp-debug is the **direct OAuth client** — connecting to an API that doesn't have its own OAuth proxy layer.
+
+**Proxy-mediated OAuth (no localhost registration needed):** When connecting through an OAuth proxy like FastMCP/oauth2proxy, the Azure app registration has the **public** callback URL (e.g., `https://my-app.example.com/oauth2/callback`). The browser redirects to the public proxy, which handles the token exchange. The localhost callback is a **second hop** internal to the MCP protocol — Azure never sees it. This is the case for apps using the FastMCP Azure proxy pattern (e.g., Datto RMM, ConnectWise PSA).
+
+**Direct OAuth (localhost registration required):** When mcp-debug connects directly to an OAuth-protected API with no intermediary proxy, mcp-debug itself is the OAuth client. In this case, register all port range callbacks in your OAuth provider:
 ```
 http://localhost:8200/callback
 http://localhost:8201/callback
