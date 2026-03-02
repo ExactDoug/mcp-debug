@@ -21,6 +21,7 @@ servers:
 
 dashboard:
   port: 8200
+  port_range: 10
 
 proxy:
   healthCheckInterval: "30s"

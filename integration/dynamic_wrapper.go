@@ -85,7 +85,8 @@ func NewDynamicWrapper(cfg *config.ProxyConfig) *DynamicWrapper {
 	// Create dashboard if enabled
 	if cfg.Dashboard.IsEnabled() {
 		port := cfg.Dashboard.GetPort()
-		wrapper.dashboard = dashboard.NewServer(port)
+		portRange := cfg.Dashboard.GetPortRange()
+		wrapper.dashboard = dashboard.NewServer(port, portRange)
 		wrapper.dashboard.SetStatusProvider(wrapper)
 		wrapper.dashboard.SetAuthTrigger(wrapper)
 	}
@@ -949,7 +950,7 @@ func (w *DynamicWrapper) Initialize(ctx context.Context) error {
 				Server:  serverName,
 				Message: message,
 			})
-		})
+		}, w.dashboard.Port())
 	}
 
 	// Initialize the proxy server with static servers
@@ -1005,6 +1006,7 @@ func (w *DynamicWrapper) wireClientCallbackHandler(c client.MCPClient) {
 	}
 
 	oauthProvider.SetCallbackHandler(w.dashboard.Callbacks())
+	oauthProvider.SetRedirectPort(w.dashboard.Port())
 	oauthProvider.SetServerName(httpClient.ServerName())
 	oauthProvider.SetAuthEventFunc(func(serverName, message string) {
 		if w.dashboard != nil {
@@ -1218,6 +1220,7 @@ func (w *DynamicWrapper) TriggerAuth(ctx context.Context, serverName string) (st
 	// Wire callback handler, events, and auto-reconnect
 	if w.dashboard != nil {
 		oauthProvider.SetCallbackHandler(w.dashboard.Callbacks())
+		oauthProvider.SetRedirectPort(w.dashboard.Port())
 		oauthProvider.SetServerName(serverName)
 		oauthProvider.SetAuthEventFunc(func(sn, message string) {
 			w.dashboard.Events().Publish(dashboard.Event{

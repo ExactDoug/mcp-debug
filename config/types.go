@@ -28,8 +28,9 @@ type InheritConfig struct {
 
 // DashboardConfig represents dashboard web server settings.
 type DashboardConfig struct {
-	Enabled *bool `yaml:"enabled,omitempty"` // nil = default (true)
-	Port    int   `yaml:"port,omitempty"`
+	Enabled   *bool `yaml:"enabled,omitempty"`    // nil = default (true)
+	Port      int   `yaml:"port,omitempty"`
+	PortRange int   `yaml:"port_range,omitempty"` // number of ports to try (default 1)
 }
 
 // IsEnabled returns whether the dashboard is enabled (default: true).
@@ -49,6 +50,14 @@ func (d *DashboardConfig) GetPort() int {
 		return d.Port
 	}
 	return 8100
+}
+
+// GetPortRange returns the number of ports to try (default 1 = single port).
+func (d *DashboardConfig) GetPortRange() int {
+	if d.PortRange > 1 {
+		return d.PortRange
+	}
+	return 1
 }
 
 // ProxyConfig represents the main configuration for the proxy server

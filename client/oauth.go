@@ -122,6 +122,12 @@ func (p *OAuthProvider) SetAuthSuccessFunc(fn func()) {
 	p.onAuthSuccess = fn
 }
 
+// SetRedirectPort overrides the redirect port used for OAuth redirect_uri construction.
+// Called by the integration layer to sync with the dashboard's actual bound port.
+func (p *OAuthProvider) SetRedirectPort(port int) {
+	p.redirectPort = port
+}
+
 // SetPassiveMode configures the provider to only use cached/refreshed tokens.
 // When true, RefreshToken returns an error instead of starting an interactive
 // browser-based OAuth flow. Used during discovery to prevent blocking.
