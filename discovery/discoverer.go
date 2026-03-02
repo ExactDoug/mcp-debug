@@ -150,6 +150,8 @@ func (d *Discoverer) createHTTPClient(serverConfig config.ServerConfig) (client.
 
 	// Set auth provider if configured.
 	// Discovery only uses cached tokens — no interactive OAuth flows.
+	// passiveMode prevents fullAuthorizationFlow from firing on 401,
+	// avoiding port conflicts with the dashboard and browser blocking.
 	// If the server returns 401 and there's no cached token, discovery
 	// fails gracefully and the dashboard shows "Needs Auth" for the user
 	// to authenticate proactively.
@@ -159,6 +161,9 @@ func (d *Discoverer) createHTTPClient(serverConfig config.ServerConfig) (client.
 			return nil, fmt.Errorf("failed to create auth provider: %w", err)
 		}
 		if authProvider != nil {
+			if oauthProvider, ok := authProvider.(*client.OAuthProvider); ok {
+				oauthProvider.SetPassiveMode(true)
+			}
 			httpClient.SetAuthProvider(authProvider)
 		}
 	}
