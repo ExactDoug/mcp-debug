@@ -51,6 +51,9 @@ type OAuthProvider struct {
 	onAuthEvent func(serverName, message string)
 	// Optional: callback for auth success (e.g., trigger auto-reconnect).
 	onAuthSuccess func()
+	// When true, RefreshToken returns an error instead of starting interactive auth.
+	// Used during discovery to prevent blocking on browser-based OAuth flows.
+	passiveMode bool
 }
 
 // OAuthConfig holds configuration for creating an OAuthProvider.
@@ -119,6 +122,13 @@ func (p *OAuthProvider) SetAuthSuccessFunc(fn func()) {
 	p.onAuthSuccess = fn
 }
 
+// SetPassiveMode configures the provider to only use cached/refreshed tokens.
+// When true, RefreshToken returns an error instead of starting an interactive
+// browser-based OAuth flow. Used during discovery to prevent blocking.
+func (p *OAuthProvider) SetPassiveMode(passive bool) {
+	p.passiveMode = passive
+}
+
 // ApplyAuth sets the Authorization header with the current access token.
 func (p *OAuthProvider) ApplyAuth(req *http.Request) error {
 	p.mu.Lock()
@@ -161,6 +171,11 @@ func (p *OAuthProvider) RefreshToken(ctx context.Context, wwwAuth string) error 
 			return nil
 		}
 		log.Printf("[DEBUG] OAuthProvider: refresh failed, falling back to full auth flow")
+	}
+
+	// In passive mode, don't attempt interactive auth — fail fast
+	if p.passiveMode {
+		return fmt.Errorf("authentication required (no cached token; use dashboard to authenticate)")
 	}
 
 	// Full OAuth flow
