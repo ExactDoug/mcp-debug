@@ -276,9 +276,32 @@ Returns an HTML page confirming success or failure.
 dashboard:
   enabled: true   # default: true (dashboard starts with proxy)
   port: 8100      # default: 8100
+  port_range: 10  # try 8100-8109 if preferred port is taken (default: 1)
 ```
 
-Both fields are optional. If the `dashboard:` section is omitted entirely, the dashboard starts on port 8100 by default.
+All fields are optional. If the `dashboard:` section is omitted entirely, the dashboard starts on port 8100 by default.
+
+### Port Range (Concurrent Instances)
+
+When multiple Claude Code sessions run simultaneously, each launches its own mcp-debug instance. With `port_range`, the dashboard automatically selects the next available port:
+
+```yaml
+dashboard:
+  port: 8200
+  port_range: 10  # tries 8200, 8201, ..., 8209
+```
+
+The actual bound port becomes the source of truth for all OAuth `redirect_uri` construction — the per-server `auth.redirect_port` field is overridden automatically when the dashboard is active.
+
+**Azure / OAuth setup:** Register all ports in your OAuth app's redirect URIs once:
+```
+http://localhost:8200/callback
+http://localhost:8201/callback
+...
+http://localhost:8209/callback
+```
+
+All projects can then share the same `dashboard:` config block.
 
 ### Environment Variables
 
@@ -371,11 +394,12 @@ The dashboard provides a more user-friendly view of this same data, but does not
 dashboard server failed to bind to 127.0.0.1:8100: listen tcp 127.0.0.1:8100: bind: address already in use
 ```
 
-Another process (possibly a previous mcp-debug instance) is using port 8100. Either stop the other process or configure a different port:
+Another process (possibly a previous mcp-debug instance) is using port 8100. Either stop the other process, configure a different port, or use `port_range` for automatic fallback:
 
 ```yaml
 dashboard:
   port: 8200
+  port_range: 10  # automatically tries 8200-8209
 ```
 
 ### Dashboard Not Loading
