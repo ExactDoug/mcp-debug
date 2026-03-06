@@ -161,6 +161,7 @@ servers:
 dashboard:
   enabled: true   # default: true
   port: 8100      # default: 8100
+  port_range: 10  # try 8100-8109 if preferred port is taken (default: 1)
 ```
 
 ### Environment Variables

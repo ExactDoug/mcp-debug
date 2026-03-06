@@ -33,6 +33,14 @@ func NewCallbackRegistry(port int) *CallbackRegistry {
 	}
 }
 
+// SetPort updates the port used for callback URLs.
+// Called by Server.Start() when the actual bound port differs from the configured port.
+func (r *CallbackRegistry) SetPort(port int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.port = port
+}
+
 // RegisterPending registers a pending OAuth flow.
 // Returns the callback URL and channels for receiving the authorization code or error.
 func (r *CallbackRegistry) RegisterPending(state, serverName string) (callbackURL string, codeCh <-chan string, errCh <-chan error) {
