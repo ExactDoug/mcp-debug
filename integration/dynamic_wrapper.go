@@ -274,6 +274,33 @@ func (w *DynamicWrapper) registerManagementTools() {
 	w.baseServer.AddTool(reconnectTool, w.handleServerReconnect)
 }
 
+// registerDashboardTool registers the dashboard_info tool with the actual bound port in its description.
+// Called from Initialize() after the dashboard port is bound, so the URL is accurate.
+func (w *DynamicWrapper) registerDashboardTool() {
+	dashboardURL := fmt.Sprintf("http://localhost:%d", w.dashboard.Port())
+	dashboardTool := mcp.NewTool("dashboard_info",
+		mcp.WithDescription(fmt.Sprintf("Web dashboard for OAuth authentication, server monitoring, and live event feed. URL: %s", dashboardURL)),
+	)
+	w.baseServer.AddTool(dashboardTool, w.handleDashboardInfo)
+}
+
+func (w *DynamicWrapper) handleDashboardInfo(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	w.recordMessage("request", "tool_call", "dashboard_info", "proxy", request)
+
+	if w.dashboard == nil {
+		result := mcp.NewToolResultText("Dashboard is not running.")
+		result = w.addRecordingMetadata(result)
+		w.recordMessage("response", "tool_call", "dashboard_info", "proxy", result)
+		return result, nil
+	}
+
+	dashboardURL := fmt.Sprintf("http://localhost:%d", w.dashboard.Port())
+	result := mcp.NewToolResultText(fmt.Sprintf("Dashboard URL: %s\nFeatures: OAuth authentication, server status monitoring, live event feed (SSE)", dashboardURL))
+	result = w.addRecordingMetadata(result)
+	w.recordMessage("response", "tool_call", "dashboard_info", "proxy", result)
+	return result, nil
+}
+
 func (w *DynamicWrapper) handleServerAdd(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	// Record the request
 	w.recordMessage("request", "tool_call", "server_add", "proxy", request)
@@ -452,17 +479,22 @@ func (w *DynamicWrapper) handleServerRemove(ctx context.Context, request mcp.Cal
 		return result, nil
 	}
 	
-	// Note: We can't actually remove tools from mark3labs/mcp-go at runtime
-	// But we can close the connection and mark them as unavailable
-	
 	// Close client
 	if err := serverInfo.Client.Close(); err != nil {
 		log.Printf("Error closing client %s: %v", name, err)
 	}
-	
+
+	// Remove tools from MCP server and registry
+	if len(serverInfo.Tools) > 0 {
+		w.baseServer.DeleteTools(serverInfo.Tools...)
+		for _, toolName := range serverInfo.Tools {
+			w.proxyServer.registry.UnregisterTool(toolName)
+		}
+	}
+
 	// Remove from maps
 	delete(w.dynamicServers, name)
-	
+
 	// Remove from proxy server's client list
 	newClients := make([]client.MCPClient, 0, len(w.proxyServer.clients)-1)
 	for _, c := range w.proxyServer.clients {
@@ -471,8 +503,8 @@ func (w *DynamicWrapper) handleServerRemove(ctx context.Context, request mcp.Cal
 		}
 	}
 	w.proxyServer.clients = newClients
-	
-	result := fmt.Sprintf("Removed server '%s'. Note: %d tools remain registered but are now unavailable.",
+
+	result := fmt.Sprintf("Removed server '%s' and %d tools.",
 		name, len(serverInfo.Tools))
 
 	toolResult := mcp.NewToolResultText(result)
@@ -768,38 +800,64 @@ func (w *DynamicWrapper) handleServerReconnect(ctx context.Context, request mcp.
 	}
 	w.proxyServer.mu.Unlock()
 
-	// Update registry with new client (tools keep same names)
+	// Build set of old tool names for detecting removed tools
+	oldToolSet := make(map[string]bool, len(serverInfo.Tools))
+	for _, t := range serverInfo.Tools {
+		oldToolSet[t] = true
+	}
+
+	// Register all tools from the reconnected server (new and existing)
+	var newToolNames []string
+	newToolSet := make(map[string]bool, len(tools))
 	for _, tool := range tools {
 		prefixedName := fmt.Sprintf("%s_%s", serverInfo.Config.Prefix, tool.Name)
+		newToolNames = append(newToolNames, prefixedName)
+		newToolSet[prefixedName] = true
 
-		// Check if this tool name exists in our registered tools
-		found := false
-		for _, registeredTool := range serverInfo.Tools {
-			if registeredTool == prefixedName {
-				found = true
-				break
-			}
+		// Register/update in proxy registry
+		discoveredTool := discovery.RemoteTool{
+			OriginalName: tool.Name,
+			PrefixedName: prefixedName,
+			Description:  tool.Description,
+			InputSchema:  tool.InputSchema,
+			ServerName:   name,
 		}
+		w.proxyServer.registry.RegisterTool(discoveredTool, mcpClient)
 
-		if found {
-			// Update registry with new client
-			discoveredTool := discovery.RemoteTool{
-				OriginalName: tool.Name,
-				PrefixedName: prefixedName,
-				Description:  tool.Description,
-				InputSchema:  tool.InputSchema,
-				ServerName:   name,
-			}
-			w.proxyServer.registry.RegisterTool(discoveredTool, mcpClient)
+		// Register/update with MCP server (upsert — safe for existing tools)
+		mcpTool := w.proxyServer.createMCPTool(discoveredTool)
+		handler := w.createDynamicProxyHandler(name, tool.Name)
+		w.baseServer.AddTool(mcpTool, handler)
+
+		if oldToolSet[prefixedName] {
 			log.Printf("Updated tool registration: %s", prefixedName)
+		} else {
+			log.Printf("Registered new tool on reconnect: %s", prefixedName)
 		}
 	}
 
+	// Remove tools that no longer exist on the reconnected server
+	var removedTools []string
+	for _, oldTool := range serverInfo.Tools {
+		if !newToolSet[oldTool] {
+			removedTools = append(removedTools, oldTool)
+			w.proxyServer.registry.UnregisterTool(oldTool)
+			log.Printf("Removed stale tool on reconnect: %s", oldTool)
+		}
+	}
+	if len(removedTools) > 0 {
+		w.baseServer.DeleteTools(removedTools...)
+	}
+
+	// Replace the stale tool list with the fresh one
+	serverInfo.Tools = newToolNames
+
 	// NOW mark as connected (atomic state transition after all updates complete)
 	serverInfo.IsConnected = true
-	log.Printf("Server '%s' marked as connected", name)
+	log.Printf("Server '%s' marked as connected with %d tools (%d new, %d removed)",
+		name, len(newToolNames), len(newToolNames)-len(oldToolSet)+len(removedTools), len(removedTools))
 
-	w.publishEvent(dashboard.EventConnection, name, "Server reconnected")
+	w.publishEvent(dashboard.EventConnection, name, fmt.Sprintf("Server reconnected with %d tools", len(newToolNames)))
 
 	// Build result message based on how we reconnected
 	var resultMsg string
@@ -846,6 +904,9 @@ func (w *DynamicWrapper) createDynamicProxyHandler(serverName, originalToolName 
 				errorMsg += fmt.Sprintf(": %s", serverInfo.ErrorMessage)
 			}
 			errorMsg += "\nUse server_reconnect to restore connection."
+			if w.dashboard != nil {
+				errorMsg += fmt.Sprintf("\nDashboard: http://localhost:%d", w.dashboard.Port())
+			}
 			result := mcp.NewToolResultError(errorMsg)
 			result = w.addRecordingMetadata(result)
 			w.recordMessage("response", "tool_call", prefixedToolName, serverName, result)
@@ -874,6 +935,9 @@ func (w *DynamicWrapper) createDynamicProxyHandler(serverName, originalToolName 
 				w.mu.Unlock()
 
 				errorMsg := fmt.Sprintf("Server '%s' connection failed: %v\nUse server_reconnect to restore connection.", serverName, err)
+				if w.dashboard != nil {
+					errorMsg += fmt.Sprintf("\nDashboard: http://localhost:%d", w.dashboard.Port())
+				}
 				result := mcp.NewToolResultError(errorMsg)
 				result = w.addRecordingMetadata(result)
 				w.recordMessage("response", "tool_call", prefixedToolName, serverName, result)
@@ -937,6 +1001,11 @@ func (w *DynamicWrapper) Initialize(ctx context.Context) error {
 			// Non-fatal — continue without dashboard
 			w.dashboard = nil
 		}
+	}
+
+	// Register dashboard_info tool now that the port is bound
+	if w.dashboard != nil {
+		w.registerDashboardTool()
 	}
 
 	// Wire callback handler to proxy server BEFORE Initialize so OAuthProviders

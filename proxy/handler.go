@@ -143,6 +143,11 @@ func (r *ToolRegistry) GetClient(serverName string) (client.MCPClient, bool) {
 	return client, exists
 }
 
+// UnregisterTool removes a tool from the registry by its prefixed name
+func (r *ToolRegistry) UnregisterTool(prefixedName string) {
+	delete(r.tools, prefixedName)
+}
+
 // GetAllTools returns all registered tools
 func (r *ToolRegistry) GetAllTools() []discovery.RemoteTool {
 	var tools []discovery.RemoteTool
