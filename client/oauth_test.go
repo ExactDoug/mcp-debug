@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -341,7 +342,7 @@ func TestOAuthProvider_TokenRefreshFlow(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"authorization_servers": []string{authServer.URL},
-			"resource":             "https://mcp.example.com",
+			"resource":             "https://mcp.example.com/mcp",
 		})
 	}))
 	defer resourceServer.Close()
@@ -457,4 +458,154 @@ func (m *mockOAuthProvider) ApplyAuth(req *http.Request) error {
 func (m *mockOAuthProvider) RefreshToken(ctx context.Context, wwwAuth string) error {
 	m.refreshed = true
 	return nil
+}
+
+func TestResourceMetadataCandidates(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected []string
+	}{
+		{"https://mcp.example.com/mcp", []string{
+			"https://mcp.example.com/.well-known/oauth-protected-resource/mcp",
+			"https://mcp.example.com/.well-known/oauth-protected-resource",
+		}},
+		{"https://mcp.example.com/api/mcp/", []string{
+			"https://mcp.example.com/.well-known/oauth-protected-resource/api/mcp",
+			"https://mcp.example.com/.well-known/oauth-protected-resource",
+		}},
+		{"https://mcp.example.com", []string{"https://mcp.example.com/.well-known/oauth-protected-resource"}},
+		{"https://mcp.example.com/", []string{"https://mcp.example.com/.well-known/oauth-protected-resource"}},
+	}
+
+	for _, tt := range tests {
+		got, err := resourceMetadataCandidates(tt.input)
+		if err != nil {
+			t.Fatalf("unexpected error for %s: %v", tt.input, err)
+		}
+		if len(got) != len(tt.expected) {
+			t.Fatalf("for %s: expected %v, got %v", tt.input, tt.expected, got)
+		}
+		for i := range got {
+			if got[i] != tt.expected[i] {
+				t.Errorf("for %s: candidate %d expected %s, got %s", tt.input, i, tt.expected[i], got[i])
+			}
+		}
+	}
+}
+
+// newPathMountedResourceServer mimics a FastMCP server mounted at /mcp: it
+// publishes metadata only at metaPath, and answers unauthenticated MCP
+// requests with a 401 that advertises metaPath only when advertise is set.
+func newPathMountedResourceServer(t *testing.T, metaPath string, advertise bool) *httptest.Server {
+	t.Helper()
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == metaPath && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"resource":              srv.URL + "/mcp",
+				"authorization_servers": []string{srv.URL + "/"},
+			})
+		case r.URL.Path == "/mcp" && r.Method == http.MethodPost:
+			if advertise {
+				w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+srv.URL+metaPath+`"`)
+			} else {
+				w.Header().Set("WWW-Authenticate", "Bearer")
+			}
+			w.WriteHeader(http.StatusUnauthorized)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	return srv
+}
+
+func TestDiscoverResourceMetadata_PathSuffixedWellKnown(t *testing.T) {
+	// No resource_metadata in the 401, root well-known 404s; only the RFC 9728
+	// path-suffixed form exists.
+	srv := newPathMountedResourceServer(t, "/.well-known/oauth-protected-resource/mcp", false)
+	defer srv.Close()
+
+	provider := &OAuthProvider{serverURL: srv.URL + "/mcp"}
+	meta, err := provider.discoverResourceMetadata(context.Background(), "")
+	if err != nil {
+		t.Fatalf("discovery failed: %v", err)
+	}
+	if meta.Resource != srv.URL+"/mcp" {
+		t.Errorf("expected resource %s/mcp, got %s", srv.URL, meta.Resource)
+	}
+}
+
+func TestDiscoverResourceMetadata_ProbeHeader(t *testing.T) {
+	// No 401 in hand (dashboard flow) and metadata at a non-standard path:
+	// reachable only via the header of a probe-provoked 401.
+	srv := newPathMountedResourceServer(t, "/custom/resource-metadata", true)
+	defer srv.Close()
+
+	provider := &OAuthProvider{serverURL: srv.URL + "/mcp"}
+	meta, err := provider.discoverResourceMetadata(context.Background(), "")
+	if err != nil {
+		t.Fatalf("discovery failed: %v", err)
+	}
+	if len(meta.AuthorizationServers) != 1 {
+		t.Errorf("expected one authorization server, got %v", meta.AuthorizationServers)
+	}
+}
+
+func TestDiscoverResourceMetadata_AdvertisedURLWins(t *testing.T) {
+	srv := newPathMountedResourceServer(t, "/custom/resource-metadata", false)
+	defer srv.Close()
+
+	provider := &OAuthProvider{serverURL: srv.URL + "/mcp"}
+	wwwAuth := `Bearer resource_metadata="` + srv.URL + `/custom/resource-metadata"`
+	if _, err := provider.discoverResourceMetadata(context.Background(), wwwAuth); err != nil {
+		t.Fatalf("discovery with advertised URL failed: %v", err)
+	}
+}
+
+func TestDiscoverResourceMetadata_ReportsEveryURLTried(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	defer srv.Close()
+
+	provider := &OAuthProvider{serverURL: srv.URL + "/mcp"}
+	_, err := provider.discoverResourceMetadata(context.Background(), "")
+	if err == nil {
+		t.Fatal("expected an error when no metadata exists")
+	}
+	for _, want := range []string{
+		"/.well-known/oauth-protected-resource/mcp",
+		"/.well-known/oauth-protected-resource:",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should name %q, got: %v", want, err)
+		}
+	}
+}
+
+func TestDiscoverResourceMetadata_RejectsMismatchedResource(t *testing.T) {
+	// A server whose metadata names a different resource is an impersonation
+	// risk: RFC 9728 §3.3 says the metadata MUST NOT be used.
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/.well-known/oauth-protected-resource/mcp" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"resource":              "https://attacker.example.com/mcp",
+			"authorization_servers": []string{"https://attacker.example.com/"},
+		})
+	}))
+	defer srv.Close()
+
+	provider := &OAuthProvider{serverURL: srv.URL + "/mcp"}
+	_, err := provider.discoverResourceMetadata(context.Background(), "")
+	if err == nil {
+		t.Fatal("expected metadata naming another resource to be rejected")
+	}
+	if !strings.Contains(err.Error(), "attacker.example.com") {
+		t.Errorf("error should name the mismatched resource, got: %v", err)
+	}
 }

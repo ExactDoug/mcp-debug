@@ -228,6 +228,7 @@ func (p *OAuthProvider) InitiateAuthFlow(ctx context.Context) (string, error) {
 	flow, err := p.prepareOAuthFlow(ctx, "")
 	if err != nil {
 		p.mu.Unlock()
+		log.Printf("[DEBUG] OAuthProvider: dashboard auth flow for %s failed to start: %v", p.serverName, err)
 		return "", err
 	}
 
@@ -538,20 +539,9 @@ func (p *OAuthProvider) refreshAccessToken(ctx context.Context, wwwAuth string) 
 
 // discoverAuthServer discovers the authorization server from the MCP server.
 func (p *OAuthProvider) discoverAuthServer(ctx context.Context, wwwAuth string) (*authServerMetadata, error) {
-	resourceMetadataURL := parseResourceMetadataURL(wwwAuth)
-
-	if resourceMetadataURL == "" {
-		serverBase, err := getBaseURL(p.serverURL)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse server URL: %w", err)
-		}
-		resourceMetadataURL = serverBase + "/.well-known/oauth-protected-resource"
-	}
-
-	log.Printf("[DEBUG] OAuthProvider: fetching resource metadata from %s", resourceMetadataURL)
-	resMeta, err := fetchJSON[resourceMetadata](ctx, resourceMetadataURL)
+	resMeta, err := p.discoverResourceMetadata(ctx, wwwAuth)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch resource metadata: %w", err)
+		return nil, err
 	}
 
 	if len(resMeta.AuthorizationServers) == 0 {
@@ -577,6 +567,59 @@ func (p *OAuthProvider) discoverAuthServer(ctx context.Context, wwwAuth string) 
 	}
 
 	return asMeta, nil
+}
+
+// discoverResourceMetadata locates the RFC 9728 protected-resource metadata,
+// following the MCP authorization spec (2025-11-25, "Protected Resource
+// Metadata Discovery Requirements"): use the URL a 401's WWW-Authenticate
+// header advertises when present; otherwise fall back to the well-known URIs,
+// path-suffixed first, then root.
+//
+// The dashboard-triggered flow has no 401 in hand, so it first provokes one
+// with an unauthenticated request, as the spec's discovery sequence does. The
+// path-suffixed form matters because RFC 9728 §3.1 inserts the well-known
+// segment between host and path: a server mounted at /mcp publishes at
+// /.well-known/oauth-protected-resource/mcp and may 404 the bare root form.
+func (p *OAuthProvider) discoverResourceMetadata(ctx context.Context, wwwAuth string) (*resourceMetadata, error) {
+	if wwwAuth == "" {
+		wwwAuth = probeWWWAuthenticate(ctx, p.serverURL)
+	}
+
+	var failures []string
+	if advertised := parseResourceMetadataURL(wwwAuth); advertised != "" {
+		log.Printf("[DEBUG] OAuthProvider: fetching resource metadata from %s", advertised)
+		resMeta, err := fetchValidResourceMetadata(ctx, advertised, p.serverURL)
+		if err == nil {
+			return resMeta, nil
+		}
+		failures = append(failures, fmt.Sprintf("%s: %v", advertised, err))
+	}
+
+	candidates, err := resourceMetadataCandidates(p.serverURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse server URL: %w", err)
+	}
+	origin, err := getBaseURL(p.serverURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse server URL: %w", err)
+	}
+
+	for i, candidate := range candidates {
+		// The root form is the origin's own identifier; the MCP spec also lets
+		// a path-mounted server publish there, naming its endpoint URL.
+		accepted := []string{p.serverURL}
+		if i == len(candidates)-1 {
+			accepted = append(accepted, origin)
+		}
+		log.Printf("[DEBUG] OAuthProvider: fetching resource metadata from %s", candidate)
+		resMeta, err := fetchValidResourceMetadata(ctx, candidate, accepted...)
+		if err == nil {
+			return resMeta, nil
+		}
+		failures = append(failures, fmt.Sprintf("%s: %v", candidate, err))
+	}
+
+	return nil, fmt.Errorf("failed to fetch resource metadata (tried %s)", strings.Join(failures, "; "))
 }
 
 // registerClient performs RFC 7591 Dynamic Client Registration.
@@ -779,6 +822,65 @@ func getBaseURL(fullURL string) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%s://%s", u.Scheme, u.Host), nil
+}
+
+// fetchValidResourceMetadata fetches protected-resource metadata and applies
+// RFC 9728 §3.3: its "resource" must be identical to the resource the client
+// is accessing, or the metadata MUST NOT be used (anti-impersonation). A
+// trailing slash is not treated as a difference.
+func fetchValidResourceMetadata(ctx context.Context, metadataURL string, accepted ...string) (*resourceMetadata, error) {
+	resMeta, err := fetchJSON[resourceMetadata](ctx, metadataURL)
+	if err != nil {
+		return nil, err
+	}
+	got := strings.TrimRight(resMeta.Resource, "/")
+	for _, want := range accepted {
+		if got == strings.TrimRight(want, "/") {
+			return resMeta, nil
+		}
+	}
+	return nil, fmt.Errorf("metadata names resource %q, not %s (RFC 9728 §3.3: must not be used)",
+		resMeta.Resource, strings.Join(accepted, " or "))
+}
+
+// resourceMetadataCandidates returns the RFC 9728 well-known URLs for a
+// resource, path-suffixed form first, root form last.
+func resourceMetadataCandidates(serverURL string) ([]string, error) {
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		return nil, err
+	}
+	base := fmt.Sprintf("%s://%s", u.Scheme, u.Host)
+	root := base + "/.well-known/oauth-protected-resource"
+
+	if path := strings.TrimRight(u.EscapedPath(), "/"); path != "" {
+		return []string{root + path, root}, nil
+	}
+	return []string{root}, nil
+}
+
+// probeWWWAuthenticate sends one unauthenticated MCP request and returns the
+// WWW-Authenticate header of the 401 it provokes ("" on any other outcome).
+func probeWWWAuthenticate(ctx context.Context, serverURL string) string {
+	body := strings.NewReader(`{"jsonrpc":"2.0","id":0,"method":"ping"}`)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, serverURL, body)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		return ""
+	}
+	return resp.Header.Get("WWW-Authenticate")
 }
 
 func fetchJSON[T any](ctx context.Context, url string) (*T, error) {
