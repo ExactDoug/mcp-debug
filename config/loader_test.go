@@ -306,6 +306,19 @@ func TestGetProxySettings(t *testing.T) {
 	}
 }
 
+func TestLoadConfigMissingFile(t *testing.T) {
+	cfg, err := LoadConfig("/tmp/nonexistent-mcp-debug-test-config.yaml")
+	if err != nil {
+		t.Fatalf("expected no error for missing config, got: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected non-nil config")
+	}
+	if len(cfg.Servers) != 0 {
+		t.Errorf("expected 0 servers, got %d", len(cfg.Servers))
+	}
+}
+
 func containsString(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsString(s[1:], substr) || s[:len(substr)] == substr)
 }

@@ -71,7 +71,7 @@ func main() {
 	var (
 		proxyMode      = flag.Bool("proxy", false, "Run in proxy mode")
 		dynamicMode    = flag.Bool("dynamic", false, "Run in dynamic proxy mode (true dynamic tool registration)")
-		configPath     = flag.String("config", "", "Path to configuration file (required for proxy mode)")
+		configPath     = flag.String("config", "", "Path to configuration file (auto-discovers .mcp-debug.yaml if omitted)")
 		logFile        = flag.String("log", "", "Log file path (defaults to /tmp/mcp-proxy.log for stdio mode)")
 		recordFile     = flag.String("record", "", "Record JSON-RPC traffic to file for playback")
 		playbackClient = flag.String("playback-client", "", "Act as MCP client replaying recorded session file")
@@ -96,20 +96,20 @@ func main() {
 	
 	// Handle proxy modes
 	if *proxyMode || *dynamicMode {
-		if *configPath == "" {
-			fmt.Fprintln(os.Stderr, "Error: --config is required when using --proxy or --dynamic mode")
-			fmt.Fprintln(os.Stderr, "Usage: mcp-server --dynamic --config /path/to/config.yaml")
-			os.Exit(1)
-		}
-		
-		// Set up file logging for stdio mode
+		// Set up file logging for stdio mode (before auto-discovery so messages go to log)
 		if err := setupLogging(*logFile); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to setup logging: %v\n", err)
 			os.Exit(1)
 		}
-		
+
+		// Resolve config path: explicit --config takes priority, otherwise auto-discover
+		resolvedConfig := *configPath
+		if resolvedConfig == "" {
+			resolvedConfig = discoverConfigFile()
+		}
+
 		// Use dynamic proxy with management tools
-		if err := runDynamicProxyWithManagement(*configPath, *recordFile); err != nil {
+		if err := runDynamicProxyWithManagement(resolvedConfig, *recordFile); err != nil {
 			log.Fatalf("Dynamic proxy server failed: %v", err)
 		}
 		return
@@ -188,12 +188,25 @@ func runDynamicProxyWithManagement(configPath, recordFile string) error {
 	ctx := context.Background()
 
 	// Load configuration
-	log.Printf("Loading configuration from: %s", configPath)
-	cfg, err := config.LoadConfig(configPath)
-	if err != nil {
-		return fmt.Errorf("failed to load configuration: %w", err)
-	}
+	var cfg *config.ProxyConfig
+	if configPath == "" {
+		// No config file (auto-discovery found nothing) — use empty config
+		cfg = &config.ProxyConfig{}
+	} else {
+		log.Printf("Loading configuration from: %s", configPath)
+		_, statErr := os.Stat(configPath)
+		configMissing := os.IsNotExist(statErr)
 
+		var err error
+		cfg, err = config.LoadConfig(configPath)
+		if err != nil {
+			return fmt.Errorf("failed to load configuration: %w", err)
+		}
+
+		if configMissing {
+			log.Printf("WARNING: Config file not found: %s — starting with no servers (use server_add to add servers dynamically)", configPath)
+		}
+	}
 	log.Printf("Configuration loaded: %d servers configured", len(cfg.Servers))
 
 	// Create dynamic wrapper (uses mark3labs/mcp-go which works with stdio)
@@ -219,6 +232,99 @@ func runDynamicProxyWithManagement(configPath, recordFile string) error {
 
 	// Start the server
 	return wrapper.Start()
+}
+
+// discoverConfigFile auto-discovers the config file in the current directory.
+// Priority: .mcp-debug.yaml → config.yaml (with migration to .mcp-debug.yaml).
+// Returns the resolved path, or "" if no config found (starts with empty config).
+func discoverConfigFile() string {
+	const newName = ".mcp-debug.yaml"
+	const legacyName = "config.yaml"
+
+	newExists := fileExists(newName)
+	legacyExists := fileExists(legacyName)
+
+	// Case 1: .mcp-debug.yaml exists — use it
+	if newExists && !legacyExists {
+		log.Printf("Auto-discovered config: %s", newName)
+		return newName
+	}
+
+	// Case 2: Only legacy config.yaml exists — validate and migrate
+	if legacyExists && !newExists {
+		if isValidMCPDebugConfig(legacyName) {
+			if err := os.Rename(legacyName, newName); err != nil {
+				log.Printf("WARNING: Found %s but failed to rename to %s: %v", legacyName, newName, err)
+				log.Printf("Using %s as-is", legacyName)
+				return legacyName
+			}
+			log.Printf("Migrated %s → %s", legacyName, newName)
+			return newName
+		}
+		// config.yaml exists but isn't a valid mcp-debug config — ignore it
+		log.Printf("Found %s but it is not a valid mcp-debug config — ignoring", legacyName)
+		return ""
+	}
+
+	// Case 3: Both files exist — check if identical
+	if newExists && legacyExists {
+		if filesIdentical(newName, legacyName) {
+			// Safe to remove the legacy file — rename to .bak for safety
+			bakName := legacyName + ".bak"
+			if err := os.Rename(legacyName, bakName); err != nil {
+				log.Printf("WARNING: Could not rename duplicate %s to %s: %v", legacyName, bakName, err)
+			} else {
+				log.Printf("Both %s and %s exist and are identical — renamed legacy to %s", newName, legacyName, bakName)
+			}
+			return newName
+		}
+		// Files differ — warn user
+		log.Printf("WARNING: Both %s and %s exist with different contents — please resolve this conflict", newName, legacyName)
+		log.Printf("Using %s (preferred)", newName)
+		return newName
+	}
+
+	// Case 4: Neither file exists — start with empty config
+	log.Printf("No config file found — starting with no servers (use server_add to add servers dynamically)")
+	return ""
+}
+
+// isValidMCPDebugConfig checks if a YAML file is a valid mcp-debug proxy config.
+// Returns true if it parses and contains at least one recognized mcp-debug top-level key
+// (servers, proxy, or dashboard). This prevents migrating unrelated config.yaml files.
+func isValidMCPDebugConfig(path string) bool {
+	cfg, err := config.LoadConfig(path)
+	if err != nil {
+		return false
+	}
+	// Must have at least one recognized mcp-debug field populated
+	return len(cfg.Servers) > 0 || cfg.Proxy.MaxRetries > 0 ||
+		cfg.Proxy.HealthCheckInterval != "" || cfg.Proxy.ConnectionTimeout != "" ||
+		cfg.Dashboard.Port > 0 || cfg.Dashboard.PortRange > 0
+}
+
+// fileExists returns true if the path exists and is a regular file.
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+// filesIdentical returns true if two files have identical contents.
+func filesIdentical(a, b string) bool {
+	dataA, errA := os.ReadFile(a)
+	dataB, errB := os.ReadFile(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	if len(dataA) != len(dataB) {
+		return false
+	}
+	for i := range dataA {
+		if dataA[i] != dataB[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // runProxyServer runs the MCP proxy server with the given configuration

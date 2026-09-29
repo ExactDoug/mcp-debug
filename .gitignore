@@ -43,6 +43,7 @@ debug
 *.log
 
 # Local MCP and proxy configuration (may contain credentials/local paths)
+.mcp-debug.yaml
 config.yaml
 .mcp.json
 mcp-session.jsonl

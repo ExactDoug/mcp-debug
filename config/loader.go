@@ -12,6 +12,11 @@ func LoadConfig(path string) (*ProxyConfig, error) {
 	// Read configuration file
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			// Missing config file: return empty config (zero servers).
+			// Proxy starts with management tools only (server_add, etc.).
+			return &ProxyConfig{}, nil
+		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 	
