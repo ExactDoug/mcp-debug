@@ -1,5 +1,7 @@
 # Debugging Plan: "client not connected" After server_reconnect
 
+> **Status: RESOLVED (2026-03-06)** — fixed by PR #10 (`1282f55`, "re-discover all tools on server_reconnect instead of only existing ones"). Kept as a historical debugging record; the "Status" notes below describe the investigation at the time.
+
 ## Problem Statement
 
 After calling `server_reconnect`, the proxy says "Server now connected and tools updated", but subsequent tool calls fail with "[datto-rmm] client not connected" error.
