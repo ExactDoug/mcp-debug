@@ -69,5 +69,7 @@ effectively deployed. Two rules, both learned the hard way:
   dashboard port leave the second one headless while OAuth callbacks go to the first (#16). The DCR
   client in the token file is bound to the dashboard port it registered with, so pin it with
   `dashboard.port` + `port_range: 1`.
-- **A token refresh drops the DCR client from the token file** until #14 is fixed.
+- **A token file without `client_id` cannot be refreshed** — the next refresh re-registers a new DCR
+  client and needs a browser login. Builds before `210cb08` dropped the client on every refresh (#14),
+  so old token files may be in that state. Back up a token file (0600) before experiments that refresh it.
 - **Root checkout stays on `main`**; feature work goes in `.worktrees/<name>`.

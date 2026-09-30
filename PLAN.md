@@ -4,26 +4,27 @@ Status and sequencing for this fork live here. Item-level state (open/closed, di
 [GitHub Issues](https://github.com/ExactDoug/mcp-debug/issues) — this file references issues by
 number and never restates whether they are open or closed. `CLAUDE.md` is the durable brief.
 
-## Where things stand (2026-09-28)
+## Where things stand (2026-09-29)
 
-- `main` = `1fedda3` (PR #11, RFC 9728 path-aware resource-metadata discovery). HTTP-stream +
+- `main` = `210cb08` (PR #24, refresh keeps the DCR client in the token file — #14), on top of
+  `1fedda3` (PR #11, RFC 9728 path-aware resource-metadata discovery). HTTP-stream +
   OAuth 2.1 + DCR + dashboard-initiated auth are shipped and verified against a FastMCP (Azure
   OAuth proxy) server: discovery → token refresh → tool discovery all work.
-- `bin/mcp-debug` is built from `main` with `-ldflags` version info (`--version` shows the commit).
+- `bin/mcp-debug` is built from `main` (`210cb08`, 2026-09-29) with `-ldflags` version info (`--version` shows the commit).
   Before 2026-09-27 the deployed binary was built from a working tree that carried uncommitted
   work (see Track C) — see `CLAUDE.md` "Building" for why this matters.
 
 ## Track A — OAuth token store correctness (next)
 
-Order matters: #14 first, because every token refresh currently corrupts the token file.
-
-1. **#14** — refresh drops the DCR `client_id`/`client_secret` from the token file. Two-line fix in
-   `refreshAccessToken` + a test that refreshes and asserts the stored client credentials survive.
-   Until fixed, the next proxy start after any refresh forces a new browser login and a new DCR
-   registration.
-2. **#15** — token file shared by multiple proxy processes (read once, unlocked writes, rotating
+1. **#14** — refresh dropped the DCR `client_id`/`client_secret` from the token file. Fixed by
+   PR #24 (regression test `TestOAuthProvider_RefreshPreservesClientInTokenFile`). A token file
+   written by an older build may still lack the client; its next refresh re-registers and needs one
+   browser login, after which the client persists.
+2. **#15** (next; branch `fix/shared-token-file`, worktree `.worktrees/shared-token-file`) —
+   token file shared by multiple proxy processes (read once, unlocked writes, rotating
    one-time-use refresh tokens revoke each other). Re-read under `flock` before refresh; atomic
-   writes; pick up tokens obtained by another process.
+   writes; pick up tokens obtained by another process. Windows is a release target, so the lock must
+   be portable (not bare `syscall.Flock`).
 3. **#16** — dashboard port collision: second proxy runs headless silently and OAuth callbacks go to
    the other process. Make it visible (status field / tool error), optional `dashboard.required`.
 4. **#12, #13** — RFC 9728 discovery follow-ups from PR #11 review.
