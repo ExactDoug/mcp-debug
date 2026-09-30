@@ -3,8 +3,10 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -368,6 +370,106 @@ func TestOAuthProvider_TokenRefreshFlow(t *testing.T) {
 
 	if provider.token.AccessToken != "refreshed-token" {
 		t.Errorf("expected refreshed-token, got %s", provider.token.AccessToken)
+	}
+}
+
+// A refresh must not drop the dynamically registered client from the token
+// file: the next process loads its client_id from there (issue #14).
+func TestOAuthProvider_RefreshPreservesClientInTokenFile(t *testing.T) {
+	const (
+		dcrClientID     = "dummy-dcr-client-id"
+		dcrClientSecret = "dummy-dcr-client-secret"
+	)
+
+	var refreshClientIDs []string
+	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{
+				"authorization_endpoint": "https://unused/authorize",
+				"token_endpoint":         "http://" + r.Host + "/token",
+			})
+		case "/token":
+			r.ParseForm()
+			refreshClientIDs = append(refreshClientIDs, r.Form.Get("client_id"))
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token":  fmt.Sprintf("refreshed-token-%d", len(refreshClientIDs)),
+				"refresh_token": fmt.Sprintf("rotated-refresh-%d", len(refreshClientIDs)),
+				"token_type":    "Bearer",
+				"expires_in":    3600,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer authServer.Close()
+
+	resourceServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"authorization_servers": []string{authServer.URL},
+			"resource":              "https://mcp.example.com/mcp",
+		})
+	}))
+	defer resourceServer.Close()
+	wwwAuth := `Bearer resource_metadata="` + resourceServer.URL + `"`
+
+	// Token file as left by a completed DCR authorization flow, with an
+	// expired access token.
+	tokenFile := filepath.Join(t.TempDir(), "tokens.json")
+	if err := NewTokenStore(tokenFile).Save(&TokenData{
+		AccessToken:  "expired-token",
+		RefreshToken: "initial-refresh",
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(-1 * time.Hour),
+		ClientID:     dcrClientID,
+		ClientSecret: dcrClientSecret,
+	}); err != nil {
+		t.Fatalf("seed token file: %v", err)
+	}
+
+	// Two consecutive processes, neither configured with a client_id: each
+	// must get it from the token file and refresh with it.
+	for i := 1; i <= 2; i++ {
+		provider := NewOAuthProvider(OAuthConfig{
+			ServerURL: "https://mcp.example.com/mcp",
+			TokenFile: tokenFile,
+		})
+		req := httptest.NewRequest(http.MethodGet, "https://mcp.example.com/mcp", nil)
+		if err := provider.ApplyAuth(req); err != nil {
+			t.Fatalf("process %d: ApplyAuth: %v", i, err)
+		}
+		if err := provider.RefreshToken(context.Background(), wwwAuth); err != nil {
+			t.Fatalf("process %d: refresh failed: %v", i, err)
+		}
+
+		stored, err := NewTokenStore(tokenFile).Load()
+		if err != nil || stored == nil {
+			t.Fatalf("process %d: reload token file: %v", i, err)
+		}
+		if stored.ClientID != dcrClientID {
+			t.Errorf("process %d: stored client_id = %q, want %q", i, stored.ClientID, dcrClientID)
+		}
+		if stored.ClientSecret != dcrClientSecret {
+			t.Errorf("process %d: stored client_secret not preserved", i)
+		}
+		if want := fmt.Sprintf("refreshed-token-%d", i); stored.AccessToken != want {
+			t.Errorf("process %d: stored access_token = %q, want %q", i, stored.AccessToken, want)
+		}
+		if want := fmt.Sprintf("rotated-refresh-%d", i); stored.RefreshToken != want {
+			t.Errorf("process %d: stored refresh_token = %q, want %q", i, stored.RefreshToken, want)
+		}
+	}
+
+	for i, id := range refreshClientIDs {
+		if id != dcrClientID {
+			t.Errorf("refresh %d sent client_id %q, want %q", i+1, id, dcrClientID)
+		}
+	}
+	if len(refreshClientIDs) != 2 {
+		t.Errorf("expected 2 refresh requests, got %d", len(refreshClientIDs))
 	}
 }
 

@@ -521,6 +521,12 @@ func (p *OAuthProvider) refreshAccessToken(ctx context.Context, wwwAuth string) 
 		tokenData.RefreshToken = p.token.RefreshToken
 	}
 
+	// Carry the (possibly dynamically registered) client forward, as
+	// completeTokenExchange does; otherwise the next process to load the
+	// token file has no client_id to refresh with and re-registers.
+	tokenData.ClientID = p.clientID
+	tokenData.ClientSecret = p.clientSecret
+
 	p.token = tokenData
 	if p.tokenStore != nil {
 		if err := p.tokenStore.Save(tokenData); err != nil {
